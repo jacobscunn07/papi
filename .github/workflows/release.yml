@@ -1,0 +1,35 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Semantic release
+        id: semrel
+        uses: cycjimmy/semantic-release-action@v4
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-go@v5
+        if: steps.semrel.outputs.new_release_published == 'true'
+        with:
+          go-version-file: packages/papi/go.mod
+          cache-dependency-path: packages/papi/go.sum
+
+      - uses: goreleaser/goreleaser-action@v6
+        if: steps.semrel.outputs.new_release_published == 'true'
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
