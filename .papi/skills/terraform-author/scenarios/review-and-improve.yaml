@@ -1,0 +1,27 @@
+id: review-and-improve
+prompt: |
+  Rewrite this Terraform module to follow best practices. Provide the
+  corrected main.tf and variables.tf.
+weight: 1.0
+tags: [review]
+fixtures:
+  variables.tf: |
+    variable "name" {
+      type = string
+    }
+    variable "region" {
+      default = "us-east-1"
+    }
+  main.tf: |
+    resource "aws_s3_bucket" "bucket" {
+      bucket = var.name
+      region = var.region
+    }
+    resource "aws_s3_bucket_acl" "bucket_acl" {
+      bucket = aws_s3_bucket.bucket.id
+      acl    = "public-read"
+    }
+  outputs.tf: |
+    output "bucket_name" {
+      value = aws_s3_bucket.bucket.id
+    }

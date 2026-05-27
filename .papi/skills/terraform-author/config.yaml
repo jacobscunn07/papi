@@ -1,0 +1,14 @@
+skill: terraform-author
+
+hooks:
+  pre-run:
+    - hooks/pre-run.sh
+    - hooks/pre-run.sh
+  post-run: hooks/post-run.py
+  pre-iteration: hooks/pre-iteration.js
+  post-iteration: hooks/post-iteration.ts
+  pre-scenario: hooks/pre-scenario.sh
+  post-scenario: hooks/post-scenario.go
+  pre-eval: hooks/pre-eval.sh
+  post-eval: hooks/post-eval.sh
+  post-quality: hooks/post-quality.sh

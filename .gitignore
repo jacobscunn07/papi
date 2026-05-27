@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.js.map
+*.d.ts.map
+research/runs/
+.env
+.env.local
+research/skills/**/runs
+.papi/skills/**/runs
+.papi/skills/**/lock

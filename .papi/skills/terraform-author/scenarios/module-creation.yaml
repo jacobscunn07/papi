@@ -1,0 +1,7 @@
+id: module-creation
+prompt: |
+  Write a reusable Terraform module for creating an S3 bucket. It should
+  support versioning and be usable by multiple teams. Show the variables.tf
+  and main.tf.
+weight: 1.5
+tags: [modules, structure]

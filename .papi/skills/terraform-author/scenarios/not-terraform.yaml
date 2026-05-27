@@ -1,0 +1,6 @@
+id: not-terraform
+prompt: |
+  How do I center a div in CSS?
+weight: 0.5
+tags: [negative]
+shouldInvoke: false
