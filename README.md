@@ -2,16 +2,6 @@
 
 A monorepo of Claude Code skills with a self-improvement loop based on Karpathy's [autoresearch](https://github.com/karpathy/autoresearch) technique.
 
-## Install a skill
-
-```bash
-npx @skills/cli install terraform-author
-npx @skills/cli install --all
-npx @skills/cli list
-```
-
-Skills are installed into `~/.claude/commands/<name>.md`. Once installed, Claude Code will activate the skill based on its description, or you can invoke it explicitly with `/<name>`.
-
 ## Available skills
 
 | Skill | Description |
@@ -22,12 +12,9 @@ Skills are installed into `~/.claude/commands/<name>.md`. Once installed, Claude
 
 ```
 skills/              # Installable skill files (SKILL.md + README.md per skill)
-packages/cli/        # npx @skills/cli — the installer
 packages/papi/       # Autoresearch loop (Go, private, not distributed)
 .papi/               # Scenarios, program.md, run artifacts
 ```
-
-The `packages/papi/` and `.papi/` directories are never installed when a user runs `npx @skills/cli install`. They contain the self-improvement infrastructure only.
 
 ## Add a new skill
 

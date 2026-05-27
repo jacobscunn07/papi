@@ -2,18 +2,6 @@
 
 A Claude Code skill for writing, reviewing, and architecting Terraform and OpenTofu infrastructure-as-code.
 
-## Install
-
-```bash
-npx @skills/cli install terraform-author
-```
-
-Or install all skills:
-
-```bash
-npx @skills/cli install --all
-```
-
 ## Usage
 
 Once installed, the skill activates automatically when you ask Claude Code about Terraform topics. You can also invoke it explicitly:
