@@ -32,7 +32,6 @@ func (h *HookList) UnmarshalYAML(value *yaml.Node) error {
 type Scenario struct {
 	ID           string            `yaml:"id"           json:"id"`
 	Prompt       string            `yaml:"prompt"       json:"prompt"`
-	Weight       float64           `yaml:"weight"       json:"weight"`
 	Fixtures     map[string]string `yaml:"fixtures"     json:"fixtures"`
 	Tags         []string          `yaml:"tags"         json:"tags"`
 	ShouldInvoke *bool             `yaml:"shouldInvoke" json:"shouldInvoke"`
@@ -97,7 +96,6 @@ type EvalResult struct {
 	Score      float64 `json:"score"`
 	Reasoning  string  `json:"reasoning"`
 	Required   bool    `json:"required,omitempty"`
-	Weight     float64 `json:"weight,omitempty"`
 	IsLLMJudge bool    `json:"isLLMJudge,omitempty"`
 }
 
@@ -105,7 +103,6 @@ type EvalResult struct {
 type Eval interface {
 	ID() string
 	Name() string
-	Weight() float64
 	IsLLMJudge() bool
 	Evaluate(ctx EvalContext) (EvalResult, error)
 }

@@ -48,7 +48,6 @@ func ScoreScenario(ctx types.EvalContext, evals []types.Eval, llmWeight, nonLLMW
 				return nil, 0, fmt.Errorf("post-eval hook: %w", err)
 			}
 		}
-		r.Weight = e.Weight()
 		r.IsLLMJudge = e.IsLLMJudge()
 		results = append(results, r)
 
@@ -69,7 +68,6 @@ func ScoreScenario(ctx types.EvalContext, evals []types.Eval, llmWeight, nonLLMW
 						Name:       remaining.Name(),
 						Score:      skippedScore,
 						Reasoning:  skippedReason,
-						Weight:     remaining.Weight(),
 						IsLLMJudge: remaining.IsLLMJudge(),
 					})
 				}
@@ -86,16 +84,12 @@ func ScoreScenario(ctx types.EvalContext, evals []types.Eval, llmWeight, nonLLMW
 
 	var llmSum, llmTotal, nonLLMSum, nonLLMTotal float64
 	for i, e := range evals {
-		w := e.Weight()
-		if w == 0 {
-			w = 1.0
-		}
 		if e.IsLLMJudge() {
-			llmSum += results[i].Score * w
-			llmTotal += w
+			llmSum += results[i].Score
+			llmTotal++
 		} else {
-			nonLLMSum += results[i].Score * w
-			nonLLMTotal += w
+			nonLLMSum += results[i].Score
+			nonLLMTotal++
 		}
 	}
 
@@ -119,19 +113,14 @@ func ScoreScenario(ctx types.EvalContext, evals []types.Eval, llmWeight, nonLLMW
 	return results, score, nil
 }
 
-// AggregateScore computes a weighted average across all scenario results.
+// AggregateScore computes a simple average across all scenario results.
 func AggregateScore(results []types.ScenarioRunResult) float64 {
-	var weightedSum, totalWeight float64
-	for _, r := range results {
-		w := r.Scenario.Weight
-		if w == 0 {
-			w = 1.0
-		}
-		weightedSum += r.ScenarioScore * w
-		totalWeight += w
-	}
-	if totalWeight == 0 {
+	if len(results) == 0 {
 		return 0
 	}
-	return weightedSum / totalWeight
+	var sum float64
+	for _, r := range results {
+		sum += r.ScenarioScore
+	}
+	return sum / float64(len(results))
 }

@@ -45,6 +45,12 @@ var runCmd = &cobra.Command{
 			}
 		}
 
+		llmPct := viper.GetInt("llm-weight")
+		nonLLMPct := viper.GetInt("weight")
+		if llmPct+nonLLMPct != 100 {
+			return fmt.Errorf("llm-weight (%d) and weight (%d) must sum to 100", llmPct, nonLLMPct)
+		}
+
 		cfg := &types.ResearchConfig{
 			SkillName:      skillName,
 			SkillDir:       filepath.Join(repoRoot, "skills", skillName),
@@ -58,8 +64,8 @@ var runCmd = &cobra.Command{
 			QualityModel:   viper.GetString("quality-model"),
 			ResearchModel:  viper.GetString("research-model"),
 			MaxRuns:           viper.GetInt("max-runs"),
-			LLMJudgeWeight:    viper.GetFloat64("llm-weight"),
-			NonLLMJudgeWeight: viper.GetFloat64("non-llm-weight"),
+			LLMJudgeWeight:    float64(llmPct) / 100.0,
+			NonLLMJudgeWeight: float64(nonLLMPct) / 100.0,
 		}
 
 		return loop.Run(cfg, repoRoot)
@@ -78,8 +84,8 @@ func init() {
 	flags.String("research-model", "claude-opus-4-7", "Model for research agent")
 	flags.String("repo-root", ".", "Repository root (defaults to current directory)")
 	flags.Int("max-runs", 3, "Max runs to retain per skill (0 = keep all)")
-	flags.Float64("llm-weight", 0.3, "Category weight for LLM judge evals (0–1)")
-	flags.Float64("non-llm-weight", 0.7, "Category weight for non-LLM judge evals (0–1)")
+	flags.Int("llm-weight", 30, "Category weight % for LLM judge evals (default 30)")
+	flags.Int("weight", 70, "Category weight % for non-LLM judge evals (default 70; with llm-weight must sum to 100)")
 
 	// Bind all flags to viper so env vars and config files also work.
 	// Env var convention: RESEARCH_BUDGET, RESEARCH_ITERATIONS, etc.

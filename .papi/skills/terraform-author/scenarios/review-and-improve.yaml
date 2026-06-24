@@ -2,7 +2,6 @@ id: review-and-improve
 prompt: |
   Rewrite this Terraform module to follow best practices. Provide the
   corrected main.tf and variables.tf.
-weight: 1.0
 tags: [review]
 fixtures:
   variables.tf: |

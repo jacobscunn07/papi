@@ -14,14 +14,12 @@ import (
 type scriptEval struct {
 	id       string
 	name     string
-	weight   float64
 	filePath string
 	runner   []string
 }
 
 func (e *scriptEval) ID() string       { return e.id }
 func (e *scriptEval) Name() string     { return e.name }
-func (e *scriptEval) Weight() float64  { return e.weight }
 func (e *scriptEval) IsLLMJudge() bool { return false }
 
 func (e *scriptEval) Evaluate(ctx types.EvalContext) (types.EvalResult, error) {
@@ -79,7 +77,6 @@ func discoverEvals(dir string) []types.Eval {
 			out = append(out, &scriptEval{
 				id:       id,
 				name:     id,
-				weight:   1.0,
 				filePath: f,
 				runner:   runner,
 			})

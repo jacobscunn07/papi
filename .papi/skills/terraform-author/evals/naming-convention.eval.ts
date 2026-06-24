@@ -9,7 +9,6 @@ const NAMING_PATTERN = /\b[a-z][a-z0-9]*-[a-z][a-z0-9]*-[a-z][a-z0-9]*-(?:us|eu|
 const namingConventionEval: Eval = {
   id: 'naming-convention',
   name: 'Resource naming convention',
-  weight: 1.0,
 
   async evaluate(ctx: EvalContext): Promise<EvalResult> {
     if (!ctx.invoked || !ctx.qualityTranscript) {

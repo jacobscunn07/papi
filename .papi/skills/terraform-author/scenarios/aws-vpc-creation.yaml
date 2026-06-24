@@ -2,5 +2,4 @@ id: aws-vpc-creation
 prompt: |
   Write the Terraform code to create a VPC with public and private subnets
   across 3 availability zones in us-east-1. The CIDR should be 10.0.0.0/16.
-weight: 1.5
 tags: [aws, modules, vpc]

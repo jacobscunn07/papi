@@ -107,19 +107,14 @@ func categorizeEvals(results []types.EvalResult) (nonLLM, llm []types.EvalResult
 }
 
 func groupScore(evals []types.EvalResult) float64 {
-	var wSum, wTotal float64
-	for _, e := range evals {
-		w := e.Weight
-		if w == 0 {
-			w = 1.0
-		}
-		wSum += e.Score * w
-		wTotal += w
-	}
-	if wTotal == 0 {
+	if len(evals) == 0 {
 		return 0
 	}
-	return wSum / wTotal
+	var sum float64
+	for _, e := range evals {
+		sum += e.Score
+	}
+	return sum / float64(len(evals))
 }
 
 type scaledEvalResult struct {
@@ -128,7 +123,6 @@ type scaledEvalResult struct {
 	Score      float64 `json:"score"`
 	Reasoning  string  `json:"reasoning"`
 	Required   bool    `json:"required,omitempty"`
-	Weight     float64 `json:"weight,omitempty"`
 	IsLLMJudge bool    `json:"isLLMJudge,omitempty"`
 }
 
@@ -204,7 +198,7 @@ func runAllScenarios(
 
 		scaled := make([]scaledEvalResult, len(evalResults))
 		for i, r := range evalResults {
-			scaled[i] = scaledEvalResult{r.EvalID, r.Name, parseFloat(pct(r.Score)), r.Reasoning, r.Required, r.Weight, r.IsLLMJudge}
+			scaled[i] = scaledEvalResult{r.EvalID, r.Name, parseFloat(pct(r.Score)), r.Reasoning, r.Required, r.IsLLMJudge}
 		}
 		summary := evalSummary{
 			Score:       parseFloat(pct(scenarioScore)),
@@ -241,11 +235,7 @@ func printEvalGroup(evals []types.EvalResult) {
 		if e.IsLLMJudge {
 			name += " [llm]"
 		}
-		w := e.Weight
-		if w == 0 {
-			w = 1.0
-		}
-		fmt.Printf("    %s %-36s w=%-4.1f %6.1f   %q\n", branch, name, w, e.Score*100, e.Reasoning)
+		fmt.Printf("    %s %-36s %6.1f   %q\n", branch, name, e.Score*100, e.Reasoning)
 	}
 }
 
@@ -283,11 +273,7 @@ func printScenarioBreakdown(results []types.ScenarioRunResult) {
 		if i == len(results)-1 {
 			branch = "└─"
 		}
-		w := r.Scenario.Weight
-		if w == 0 {
-			w = 1.0
-		}
-		fmt.Printf("    %s %-32s w=%-4.1f %6.1f\n", branch, r.Scenario.ID, w, r.ScenarioScore*100)
+		fmt.Printf("    %s %-32s %6.1f\n", branch, r.Scenario.ID, r.ScenarioScore*100)
 	}
 }
 
@@ -298,12 +284,8 @@ func buildResearchPrompt(currentSkillMd string, prevResults []types.ScenarioRunR
 		for _, e := range r.EvalResults {
 			evalLines = append(evalLines, fmt.Sprintf("    %s: %s — %s", e.EvalID, pct(e.Score), e.Reasoning))
 		}
-		w := r.Scenario.Weight
-		if w == 0 {
-			w = 1.0
-		}
-		sb.WriteString(fmt.Sprintf("  Scenario %q (weight=%.1f):\n    invoked=%v | score=%s\n%s\n\n",
-			r.Scenario.ID, w, r.Invoked, pct(r.ScenarioScore), strings.Join(evalLines, "\n")))
+		sb.WriteString(fmt.Sprintf("  Scenario %q:\n    invoked=%v | score=%s\n%s\n\n",
+			r.Scenario.ID, r.Invoked, pct(r.ScenarioScore), strings.Join(evalLines, "\n")))
 	}
 
 	return fmt.Sprintf("## Iteration %d — Research Agent Input\n\n"+
