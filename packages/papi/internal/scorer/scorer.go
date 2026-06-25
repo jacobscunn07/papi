@@ -3,6 +3,7 @@ package scorer
 import (
 	"fmt"
 
+	"papi/internal/progress"
 	"papi/internal/runner"
 	"papi/internal/types"
 )
@@ -14,7 +15,7 @@ import (
 // Non-required evals are split into two categories: LLM judge and non-LLM judge.
 // Final score = llmWeight*llmCategoryScore + nonLLMWeight*nonLLMCategoryScore.
 // If one category is empty, the other carries 100% of the score.
-func ScoreScenario(ctx types.EvalContext, evals []types.Eval, llmWeight, nonLLMWeight float64, hooks *types.Hooks, hooksBaseDir string) ([]types.EvalResult, float64, error) {
+func ScoreScenario(ctx types.EvalContext, evals []types.Eval, llmWeight, nonLLMWeight float64, hooks *types.Hooks, hooksBaseDir string, rep progress.Reporter) ([]types.EvalResult, float64, error) {
 	shouldInvoke := ctx.Scenario.ShouldInvoke == nil || *ctx.Scenario.ShouldInvoke
 	results := make([]types.EvalResult, 0, len(evals))
 
@@ -26,7 +27,7 @@ func ScoreScenario(ctx types.EvalContext, evals []types.Eval, llmWeight, nonLLMW
 				"SCENARIO_ID=" + ctx.Scenario.ID,
 				"WORK_DIR=" + ctx.WorkDir,
 			}
-			if _, err := runner.RunHooks(hooks.PreEval, hooksBaseDir, evalEnv); err != nil {
+			if _, err := runner.RunHooks(hooks.PreEval, hooksBaseDir, evalEnv, rep); err != nil {
 				return nil, 0, fmt.Errorf("pre-eval hook: %w", err)
 			}
 		}
@@ -44,7 +45,7 @@ func ScoreScenario(ctx types.EvalContext, evals []types.Eval, llmWeight, nonLLMW
 				"WORK_DIR=" + ctx.WorkDir,
 				fmt.Sprintf("SCORE=%g", r.Score),
 			}
-			if _, err := runner.RunHooks(hooks.PostEval, hooksBaseDir, evalEnv); err != nil {
+			if _, err := runner.RunHooks(hooks.PostEval, hooksBaseDir, evalEnv, rep); err != nil {
 				return nil, 0, fmt.Errorf("post-eval hook: %w", err)
 			}
 		}

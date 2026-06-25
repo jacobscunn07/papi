@@ -2,6 +2,7 @@ package loop
 
 import (
 	"bytes"
+	"context"
 	_ "embed"
 	"encoding/json"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"papi/internal/config"
 	"papi/internal/evals"
 	researchgit "papi/internal/git"
+	"papi/internal/progress"
 	"papi/internal/runner"
 	"papi/internal/scorer"
 	"papi/internal/types"
@@ -127,12 +129,16 @@ type scaledEvalResult struct {
 }
 
 func runAllScenarios(
+	ctx context.Context,
+	iter int,
 	scenarios []types.Scenario,
 	cfg *types.ResearchConfig,
 	evalList []types.Eval,
 	iterationDir string,
 	hooks *types.Hooks,
 	hooksBaseDir string,
+	rep progress.Reporter,
+	stream bool,
 ) ([]types.ScenarioRunResult, float64, error) {
 	desc, content, _, err := config.ReadSkillMd(cfg.SkillDir)
 	if err != nil {
@@ -143,24 +149,42 @@ func runAllScenarios(
 	results := make([]types.ScenarioRunResult, 0, len(scenarios))
 
 	for _, scenario := range scenarios {
+		if ctx.Err() != nil {
+			return results, totalCost, ctx.Err()
+		}
 		scenarioDir := filepath.Join(iterationDir, scenario.ID)
-		fmt.Printf("  ▸ %s  ", scenario.ID)
+		rep.Emit(progress.ScenarioStarted{Iter: iter, ID: scenario.ID})
 
-		ctx, cost, durationMs, err := runner.RunScenario(
+		var sink runner.StreamSink
+		if stream {
+			sid := scenario.ID
+			sink = func(phase progress.Phase, text string) {
+				rep.Emit(progress.StreamChunk{Iter: iter, ID: sid, Phase: phase, Text: text})
+			}
+		}
+
+		evalCtx, cost, durationMs, err := runner.RunScenario(
+			ctx,
 			scenario,
 			cfg.SkillName, desc, content, cfg.SkillDir, scenarioDir,
 			cfg.ScenarioModel, cfg.QualityModel,
 			hooks, hooksBaseDir,
+			sink,
+			rep,
 		)
 		if err != nil {
-			return nil, totalCost, fmt.Errorf("scenario %s: %w", scenario.ID, err)
+			return results, totalCost, fmt.Errorf("scenario %s: %w", scenario.ID, err)
 		}
 		totalCost += cost
 
 		// Assessment Phase: run all evals against the invocation + quality transcripts.
-		evalResults, scenarioScore, err := scorer.ScoreScenario(ctx, evalList, cfg.LLMJudgeWeight, cfg.NonLLMJudgeWeight, hooks, hooksBaseDir)
+		rep.Emit(progress.PhaseChanged{Iter: iter, ID: scenario.ID, Phase: progress.PhaseScoring})
+		evalResults, scenarioScore, err := scorer.ScoreScenario(evalCtx, evalList, cfg.LLMJudgeWeight, cfg.NonLLMJudgeWeight, hooks, hooksBaseDir, rep)
 		if err != nil {
-			return nil, totalCost, fmt.Errorf("score scenario %s: %w", scenario.ID, err)
+			return results, totalCost, fmt.Errorf("score scenario %s: %w", scenario.ID, err)
+		}
+		for _, er := range evalResults {
+			rep.Emit(progress.EvalDone{Iter: iter, ScenarioID: scenario.ID, Eval: er})
 		}
 
 		if hooks != nil && len(hooks.PostScenario) > 0 {
@@ -169,16 +193,16 @@ func runAllScenarios(
 				"WORK_DIR=" + scenarioDir,
 				fmt.Sprintf("SCENARIO_SCORE=%g", scenarioScore),
 			}
-			if _, err := runner.RunHooks(hooks.PostScenario, hooksBaseDir, postEnv); err != nil {
-				return nil, totalCost, fmt.Errorf("post-scenario hook: %w", err)
+			if _, err := runner.RunHooks(hooks.PostScenario, hooksBaseDir, postEnv, rep); err != nil {
+				return results, totalCost, fmt.Errorf("post-scenario hook: %w", err)
 			}
 		}
 
 		result := types.ScenarioRunResult{
 			Scenario:         scenario,
-			InvocationOutput: ctx.InvocationOutput,
-			QualityOutput:    ctx.QualityOutput,
-			Invoked:          ctx.Invoked,
+			InvocationOutput: evalCtx.InvocationOutput,
+			QualityOutput:    evalCtx.QualityOutput,
+			Invoked:          evalCtx.Invoked,
 			EvalResults:      evalResults,
 			ScenarioScore:    scenarioScore,
 			DurationMs:       durationMs,
@@ -187,9 +211,9 @@ func runAllScenarios(
 
 		_ = os.MkdirAll(scenarioDir, 0755)
 		_ = os.WriteFile(filepath.Join(scenarioDir, "prompt.md"), []byte(scenario.Prompt), 0644)
-		_ = os.WriteFile(filepath.Join(scenarioDir, "invocation.md"), []byte(ctx.InvocationTranscript), 0644)
-		if ctx.QualityTranscript != "" {
-			_ = os.WriteFile(filepath.Join(scenarioDir, "response.md"), []byte(ctx.QualityTranscript), 0644)
+		_ = os.WriteFile(filepath.Join(scenarioDir, "invocation.md"), []byte(evalCtx.InvocationTranscript), 0644)
+		if evalCtx.QualityTranscript != "" {
+			_ = os.WriteFile(filepath.Join(scenarioDir, "response.md"), []byte(evalCtx.QualityTranscript), 0644)
 		}
 
 		nonLLMEvals, llmEvals := categorizeEvals(evalResults)
@@ -210,7 +234,7 @@ func runAllScenarios(
 			_ = os.WriteFile(filepath.Join(scenarioDir, "evals.json"), b, 0644)
 		}
 
-		printScenarioResult(result, cfg.LLMJudgeWeight, cfg.NonLLMJudgeWeight)
+		rep.Emit(progress.ScenarioDone{Iter: iter, Result: result})
 	}
 
 	return results, totalCost, nil
@@ -220,61 +244,6 @@ func parseFloat(s string) float64 {
 	var f float64
 	fmt.Sscanf(s, "%f", &f)
 	return f
-}
-
-func printEvalGroup(evals []types.EvalResult) {
-	for i, e := range evals {
-		branch := "├─"
-		if i == len(evals)-1 {
-			branch = "└─"
-		}
-		name := e.Name
-		if e.Required {
-			name += " [required]"
-		}
-		if e.IsLLMJudge {
-			name += " [llm]"
-		}
-		fmt.Printf("    %s %-36s %6.1f   %q\n", branch, name, e.Score*100, e.Reasoning)
-	}
-}
-
-func printScenarioResult(result types.ScenarioRunResult, llmWeight, nonLLMWeight float64) {
-	invokedLabel := "INVOKED"
-	if !result.Invoked {
-		shouldInvoke := result.Scenario.ShouldInvoke == nil || *result.Scenario.ShouldInvoke
-		if shouldInvoke {
-			invokedLabel = "NOT INVOKED"
-		} else {
-			invokedLabel = "NOT INVOKED ✓"
-		}
-	}
-	fmt.Printf("[%s]  score: %s\n", invokedLabel, pct(result.ScenarioScore))
-
-	nonLLMEvals, llmEvals := categorizeEvals(result.EvalResults)
-	nonLLMScore := groupScore(nonLLMEvals)
-	llmScore := groupScore(llmEvals)
-
-	if len(nonLLMEvals) > 0 {
-		fmt.Printf("    ── non-llm  %.0f%% ──────────────────────────  %5.1f\n", nonLLMWeight*100, nonLLMScore*100)
-		printEvalGroup(nonLLMEvals)
-		fmt.Println()
-	}
-	if len(llmEvals) > 0 {
-		fmt.Printf("    ── llm  %.0f%% ─────────────────────────────  %5.1f\n", llmWeight*100, llmScore*100)
-		printEvalGroup(llmEvals)
-		fmt.Println()
-	}
-}
-
-func printScenarioBreakdown(results []types.ScenarioRunResult) {
-	for i, r := range results {
-		branch := "├─"
-		if i == len(results)-1 {
-			branch = "└─"
-		}
-		fmt.Printf("    %s %-32s %6.1f\n", branch, r.Scenario.ID, r.ScenarioScore*100)
-	}
 }
 
 func buildResearchPrompt(currentSkillMd string, prevResults []types.ScenarioRunResult, prevScore float64, iteration int) string {
@@ -345,7 +314,7 @@ func callResearchAgent(agentPrompt, systemPrompt, model string) (description, sk
 	return "", stripPreamble(out.Result), out.TotalCostUSD, nil
 }
 
-func purgeOldRuns(runsDir string, maxRuns int) error {
+func purgeOldRuns(runsDir string, maxRuns int, rep progress.Reporter) error {
 	if maxRuns <= 0 {
 		return nil
 	}
@@ -370,12 +339,12 @@ func purgeOldRuns(runsDir string, maxRuns int) error {
 		if err := os.RemoveAll(path); err != nil {
 			return err
 		}
-		fmt.Printf("Purged old run: %s\n", d.Name())
+		rep.Emit(progress.LogLine{Text: "Purged old run: " + d.Name()})
 	}
 	return nil
 }
 
-func acquireLock(repoRoot, skillName string) (func(), error) {
+func acquireLock(repoRoot, skillName string, rep progress.Reporter) (func(), error) {
 	lockPath := filepath.Join(repoRoot, ".papi", "skills", skillName, "lock")
 
 	if data, err := os.ReadFile(lockPath); err == nil {
@@ -389,7 +358,7 @@ func acquireLock(repoRoot, skillName string) (func(), error) {
 			if alive {
 				return nil, fmt.Errorf("skill %q locked by PID %d (started %s); another experiment is already running", skillName, lf.PID, lf.StartedAt)
 			}
-			fmt.Printf("Removing stale lock from PID %d\n", lf.PID)
+			rep.Emit(progress.LogLine{Text: fmt.Sprintf("Removing stale lock from PID %d", lf.PID)})
 			_ = os.Remove(lockPath)
 		}
 	}
@@ -407,14 +376,19 @@ func acquireLock(repoRoot, skillName string) (func(), error) {
 	return func() { _ = os.Remove(lockPath) }, nil
 }
 
-// Run executes the full research loop.
-func Run(cfg *types.ResearchConfig, repoRoot string) error {
-	bar := strings.Repeat("━", 55)
-	fmt.Printf("\n%s\n", bar)
-	fmt.Printf("Skill: %s    Max: %d iterations    Budget: $%.2f\n", cfg.SkillName, cfg.MaxIterations, cfg.MaxBudgetUSD)
-	fmt.Printf("%s\n", bar)
+// snapshotSkillMd copies the SKILL.md currently on disk into the iteration dir so
+// that the exact version that ran (accepted or rejected) is preserved for diffing.
+func snapshotSkillMd(skillDir, iterDir string) {
+	if b, err := os.ReadFile(filepath.Join(skillDir, "SKILL.md")); err == nil {
+		_ = os.WriteFile(filepath.Join(iterDir, "SKILL.md"), b, 0644)
+	}
+}
 
-	release, err := acquireLock(repoRoot, cfg.SkillName)
+// Run executes the full research loop, emitting progress events to rep. When
+// stream is true, Claude output is streamed live via stream-json. Cancelling ctx
+// stops the loop gracefully at the next scenario/iteration boundary.
+func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, rep progress.Reporter, stream bool) error {
+	release, err := acquireLock(repoRoot, cfg.SkillName, rep)
 	if err != nil {
 		return err
 	}
@@ -428,35 +402,86 @@ func Run(cfg *types.ResearchConfig, repoRoot string) error {
 	for i, s := range scenarios {
 		ids[i] = s.ID
 	}
-	fmt.Printf("Scenarios (%d): %s\n", len(scenarios), strings.Join(ids, ", "))
 
 	evalList := evals.NewRegistry(cfg.CustomEvalsDir)
 	git := researchgit.New(repoRoot)
 	runTimestamp := fmt.Sprintf("%d", time.Now().UnixMilli())
 	var totalCost float64
 
+	rep.Emit(progress.RunStarted{
+		Skill:         cfg.SkillName,
+		Timestamp:     runTimestamp,
+		MaxIterations: cfg.MaxIterations,
+		Budget:        cfg.MaxBudgetUSD,
+		ScenarioIDs:   ids,
+	})
+
+	evalIDs := make([]string, len(evalList))
+	for i, e := range evalList {
+		evalIDs[i] = e.ID()
+	}
+	rep.Emit(progress.LogLine{Text: "Loaded evals: " + strings.Join(evalIDs, ", ")})
+
 	if hooks != nil && len(hooks.PreRun) > 0 {
 		preRunEnv := []string{
 			"SKILL_NAME=" + cfg.SkillName,
 			"RUN_TIMESTAMP=" + runTimestamp,
 		}
-		if _, err := runner.RunHooks(hooks.PreRun, hooksBaseDir, preRunEnv); err != nil {
+		if _, err := runner.RunHooks(hooks.PreRun, hooksBaseDir, preRunEnv, rep); err != nil {
 			return fmt.Errorf("pre-run hook: %w", err)
 		}
 	}
 
-	// Baseline
-	fmt.Println("\n══ BASELINE ══")
+	// finalize tags the best SHA, purges old runs, runs the post-run hook and
+	// emits RunDone. Shared by the normal and the cancelled (graceful stop) paths.
+	finalize := func(bestScore float64, bestSha string) error {
+		tag := ""
+		if !cfg.DryRun && bestSha != "" {
+			tag = fmt.Sprintf("research/%s/%s-best-%s", cfg.SkillName, runTimestamp, pct(bestScore))
+			if err := git.CreateTag(tag); err != nil {
+				return err
+			}
+		}
+
+		runsDir := filepath.Join(repoRoot, ".papi", "skills", cfg.SkillName, "runs")
+		if err := purgeOldRuns(runsDir, cfg.MaxRuns, rep); err != nil {
+			return fmt.Errorf("purge old runs: %w", err)
+		}
+
+		if hooks != nil && len(hooks.PostRun) > 0 {
+			postRunEnv := []string{
+				"SKILL_NAME=" + cfg.SkillName,
+				"RUN_TIMESTAMP=" + runTimestamp,
+				fmt.Sprintf("BEST_SCORE=%g", bestScore),
+				fmt.Sprintf("TOTAL_COST_USD=%g", totalCost),
+			}
+			if _, err := runner.RunHooks(hooks.PostRun, hooksBaseDir, postRunEnv, rep); err != nil {
+				return fmt.Errorf("post-run hook: %w", err)
+			}
+		}
+
+		rep.Emit(progress.RunDone{Best: bestScore, Cost: totalCost, Tag: tag})
+		return nil
+	}
+
+	// Baseline (iteration 0)
+	rep.Emit(progress.IterationStarted{Iter: 0, Best: 0})
 	baselineDir := iterationDirPath(repoRoot, cfg.SkillName, runTimestamp, 0)
 	_ = os.MkdirAll(baselineDir, 0755)
-	baselineResults, baselineCost, err := runAllScenarios(scenarios, cfg, evalList, baselineDir, hooks, hooksBaseDir)
+	snapshotSkillMd(cfg.SkillDir, baselineDir)
+	baselineResults, baselineCost, err := runAllScenarios(ctx, 0, scenarios, cfg, evalList, baselineDir, hooks, hooksBaseDir, rep, stream)
+	totalCost += baselineCost
 	if err != nil {
+		if ctx.Err() != nil {
+			score := scorer.AggregateScore(baselineResults)
+			_ = saveIterationResults(baselineDir, baselineResults, score)
+			rep.Emit(progress.LogLine{Text: "Stopped."})
+			return finalize(score, "")
+		}
 		return fmt.Errorf("baseline: %w", err)
 	}
-	totalCost += baselineCost
 	bestScore := scorer.AggregateScore(baselineResults)
-	fmt.Printf("  Aggregate: %s  |  Cost: $%.4f\n", pct(bestScore), baselineCost)
-	printScenarioBreakdown(baselineResults)
+	rep.Emit(progress.IterationDone{Iter: 0, Score: bestScore, Cost: baselineCost, Results: baselineResults})
 
 	if err := saveIterationResults(baselineDir, baselineResults, bestScore); err != nil {
 		return err
@@ -483,12 +508,16 @@ func Run(cfg *types.ResearchConfig, repoRoot string) error {
 	prevResults := baselineResults
 
 	for iter := 1; iter <= cfg.MaxIterations; iter++ {
+		if ctx.Err() != nil {
+			rep.Emit(progress.LogLine{Text: "Stopped."})
+			break
+		}
 		if totalCost >= cfg.MaxBudgetUSD {
-			fmt.Printf("\nBudget exhausted ($%.2f). Stopping.\n", totalCost)
+			rep.Emit(progress.LogLine{Text: fmt.Sprintf("Budget exhausted ($%.2f). Stopping.", totalCost)})
 			break
 		}
 
-		fmt.Printf("\n══ ITERATION %d/%d  (best: %s) ══\n", iter, cfg.MaxIterations, pct(bestScore))
+		rep.Emit(progress.IterationStarted{Iter: iter, Best: bestScore})
 
 		if hooks != nil && len(hooks.PreIteration) > 0 {
 			preIterEnv := []string{
@@ -496,7 +525,7 @@ func Run(cfg *types.ResearchConfig, repoRoot string) error {
 				fmt.Sprintf("ITERATION=%d", iter),
 				fmt.Sprintf("BEST_SCORE=%g", bestScore),
 			}
-			if _, err := runner.RunHooks(hooks.PreIteration, hooksBaseDir, preIterEnv); err != nil {
+			if _, err := runner.RunHooks(hooks.PreIteration, hooksBaseDir, preIterEnv, rep); err != nil {
 				return fmt.Errorf("pre-iteration hook: %w", err)
 			}
 		}
@@ -507,16 +536,12 @@ func Run(cfg *types.ResearchConfig, repoRoot string) error {
 		}
 		agentPrompt := buildResearchPrompt(string(currentSkillMdBytes), prevResults, bestScore, iter)
 
-		fmt.Print("  Calling research agent... ")
 		description, proposedSkillMd, agentCost, err := callResearchAgent(agentPrompt, programMd, cfg.ResearchModel)
 		if err != nil {
 			return fmt.Errorf("research agent iter %d: %w", iter, err)
 		}
 		totalCost += agentCost
-		fmt.Printf("$%.4f\n", agentCost)
-		if description != "" {
-			fmt.Printf("  Experiment: %q\n", description)
-		}
+		rep.Emit(progress.ResearchAgentDone{Iter: iter, Description: description, Cost: agentCost})
 
 		if !cfg.DryRun {
 			if err := os.WriteFile(filepath.Join(cfg.SkillDir, "SKILL.md"), []byte(proposedSkillMd), 0644); err != nil {
@@ -526,27 +551,37 @@ func Run(cfg *types.ResearchConfig, repoRoot string) error {
 
 		iterDir := iterationDirPath(repoRoot, cfg.SkillName, runTimestamp, iter)
 		_ = os.MkdirAll(iterDir, 0755)
-		iterResults, iterCost, err := runAllScenarios(scenarios, cfg, evalList, iterDir, hooks, hooksBaseDir)
+		snapshotSkillMd(cfg.SkillDir, iterDir)
+		if description != "" {
+			_ = os.WriteFile(filepath.Join(iterDir, "experiment.txt"), []byte(description), 0644)
+		}
+		iterResults, iterCost, err := runAllScenarios(ctx, iter, scenarios, cfg, evalList, iterDir, hooks, hooksBaseDir, rep, stream)
+		totalCost += iterCost
 		if err != nil {
+			if ctx.Err() != nil {
+				_ = saveIterationResults(iterDir, iterResults, scorer.AggregateScore(iterResults))
+				// Restore best SKILL.md so a half-finished iteration is not left on disk.
+				if !cfg.DryRun && bestSha != "" {
+					_ = git.RevertSkillFile(filepath.Join(cfg.SkillDir, "SKILL.md"), bestSha)
+				}
+				rep.Emit(progress.LogLine{Text: "Stopped."})
+				return finalize(bestScore, bestSha)
+			}
 			return fmt.Errorf("iter %d scenarios: %w", iter, err)
 		}
-		totalCost += iterCost
 		iterScore := scorer.AggregateScore(iterResults)
 		delta := iterScore - bestScore
-		deltaDisplay := pct(delta)
-		if delta > 0 {
-			deltaDisplay = "+" + deltaDisplay
-		}
-		fmt.Printf("  Aggregate: %s  (Δ %s)  |  Cost: $%.4f\n", pct(iterScore), deltaDisplay, iterCost)
-		printScenarioBreakdown(iterResults)
+		improved := iterScore > bestScore
 
 		if err := saveIterationResults(iterDir, iterResults, iterScore); err != nil {
 			return err
 		}
 
+		rep.Emit(progress.IterationDone{Iter: iter, Score: iterScore, Delta: delta, Improved: improved, Cost: iterCost, Results: iterResults})
+
 		if !cfg.DryRun {
 			skillMdPath := filepath.Join(cfg.SkillDir, "SKILL.md")
-			if iterScore > bestScore {
+			if improved {
 				bestSha, err = git.CommitSkill(skillMdPath,
 					fmt.Sprintf("research(%s): iter %03d score=%s [+%s]",
 						cfg.SkillName, iter, pct(iterScore), pct(delta)))
@@ -554,14 +589,14 @@ func Run(cfg *types.ResearchConfig, repoRoot string) error {
 					return err
 				}
 				bestScore = iterScore
-				fmt.Printf("  → IMPROVED +%s\n", pct(delta))
+				rep.Emit(progress.LogLine{Text: fmt.Sprintf("  → IMPROVED +%s", pct(delta))})
 			} else {
 				if bestSha != "" {
 					if err := git.RevertSkillFile(skillMdPath, bestSha); err != nil {
 						return err
 					}
 				}
-				fmt.Printf("  → REVERTED to best (%s)\n", pct(bestScore))
+				rep.Emit(progress.LogLine{Text: fmt.Sprintf("  → REVERTED to best (%s)", pct(bestScore))})
 			}
 		}
 
@@ -573,41 +608,13 @@ func Run(cfg *types.ResearchConfig, repoRoot string) error {
 				fmt.Sprintf("ITERATION=%d", iter),
 				fmt.Sprintf("ITER_SCORE=%g", iterScore),
 				fmt.Sprintf("BEST_SCORE=%g", bestScore),
-				fmt.Sprintf("IMPROVED=%v", delta > 0),
+				fmt.Sprintf("IMPROVED=%v", improved),
 			}
-			if _, err := runner.RunHooks(hooks.PostIteration, hooksBaseDir, postIterEnv); err != nil {
+			if _, err := runner.RunHooks(hooks.PostIteration, hooksBaseDir, postIterEnv, rep); err != nil {
 				return fmt.Errorf("post-iteration hook: %w", err)
 			}
 		}
 	}
 
-	fmt.Printf("\n%s\n", bar)
-	fmt.Printf("Done. Best score: %s | Total cost: $%.4f\n", pct(bestScore), totalCost)
-	if !cfg.DryRun && bestSha != "" {
-		tag := fmt.Sprintf("research/%s/%s-best-%s", cfg.SkillName, runTimestamp, pct(bestScore))
-		if err := git.CreateTag(tag); err != nil {
-			return err
-		}
-		fmt.Printf("Tagged: %s\n", tag)
-	}
-	fmt.Printf("%s\n", bar)
-
-	runsDir := filepath.Join(repoRoot, ".papi", "skills", cfg.SkillName, "runs")
-	if err := purgeOldRuns(runsDir, cfg.MaxRuns); err != nil {
-		return fmt.Errorf("purge old runs: %w", err)
-	}
-
-	if hooks != nil && len(hooks.PostRun) > 0 {
-		postRunEnv := []string{
-			"SKILL_NAME=" + cfg.SkillName,
-			"RUN_TIMESTAMP=" + runTimestamp,
-			fmt.Sprintf("BEST_SCORE=%g", bestScore),
-			fmt.Sprintf("TOTAL_COST_USD=%g", totalCost),
-		}
-		if _, err := runner.RunHooks(hooks.PostRun, hooksBaseDir, postRunEnv); err != nil {
-			return fmt.Errorf("post-run hook: %w", err)
-		}
-	}
-
-	return nil
+	return finalize(bestScore, bestSha)
 }

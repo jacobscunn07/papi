@@ -1,13 +1,15 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
+	"papi/internal/appconfig"
 	"papi/internal/loop"
-	"papi/internal/types"
+	"papi/internal/progress"
+	"papi/internal/tui"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -16,6 +18,14 @@ import (
 var papiCmd = &cobra.Command{
 	Use:   "papi",
 	Short: "Autoresearch loop for self-improving Claude skills",
+	// With no subcommand, launch the interactive TUI.
+	RunE: func(cmd *cobra.Command, args []string) error {
+		repoRoot, err := appconfig.Resolve()
+		if err != nil {
+			return err
+		}
+		return tui.Run(repoRoot)
+	},
 }
 
 var runCmd = &cobra.Command{
@@ -23,52 +33,18 @@ var runCmd = &cobra.Command{
 	Short: "Run the autoresearch loop for a skill",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		viper.SetConfigFile(filepath.Join(viper.GetString("repo-root"), ".papi", "config"))
-		viper.SetConfigType("yaml")
-		if err := viper.ReadInConfig(); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("read .papi/config: %w", err)
-		}
-
-		repoRoot, err := filepath.Abs(viper.GetString("repo-root"))
+		repoRoot, err := appconfig.Resolve()
 		if err != nil {
-			return fmt.Errorf("resolve repo-root: %w", err)
+			return err
 		}
 
-		skillName := args[0]
-		tagsRaw := viper.GetString("tags")
-		var tags []string
-		if tagsRaw != "" {
-			for _, t := range strings.Split(tagsRaw, ",") {
-				if trimmed := strings.TrimSpace(t); trimmed != "" {
-					tags = append(tags, trimmed)
-				}
-			}
+		cfg, err := appconfig.Build(repoRoot, args[0])
+		if err != nil {
+			return err
 		}
 
-		llmPct := viper.GetInt("llm-weight")
-		nonLLMPct := viper.GetInt("weight")
-		if llmPct+nonLLMPct != 100 {
-			return fmt.Errorf("llm-weight (%d) and weight (%d) must sum to 100", llmPct, nonLLMPct)
-		}
-
-		cfg := &types.ResearchConfig{
-			SkillName:      skillName,
-			SkillDir:       filepath.Join(repoRoot, "skills", skillName),
-			ScenariosDir:   filepath.Join(repoRoot, ".papi", "skills", skillName, "scenarios"),
-			CustomEvalsDir: filepath.Join(repoRoot, ".papi", "skills", skillName, "evals"),
-			MaxIterations:  viper.GetInt("iterations"),
-			MaxBudgetUSD:   viper.GetFloat64("budget"),
-			Tags:           tags,
-			DryRun:         viper.GetBool("dry-run"),
-			ScenarioModel:  viper.GetString("scenario-model"),
-			QualityModel:   viper.GetString("quality-model"),
-			ResearchModel:  viper.GetString("research-model"),
-			MaxRuns:           viper.GetInt("max-runs"),
-			LLMJudgeWeight:    float64(llmPct) / 100.0,
-			NonLLMJudgeWeight: float64(nonLLMPct) / 100.0,
-		}
-
-		return loop.Run(cfg, repoRoot)
+		rep := progress.NewCLIReporter(cfg.MaxIterations, cfg.LLMJudgeWeight, cfg.NonLLMJudgeWeight)
+		return loop.Run(context.Background(), cfg, repoRoot, rep, false)
 	},
 }
 
