@@ -30,6 +30,16 @@ type Run struct {
 	Timestamp  string
 	Dir        string
 	Iterations []Iteration
+	State      *types.RunState // run-level checkpoint (state.json), nil if absent
+}
+
+// Resumable reports whether this run can be continued: it has a checkpoint, has
+// not reached its natural end, and still has iterations left. Runs without a
+// state.json (older runs, or runs interrupted before the baseline completed)
+// report false.
+func (r Run) Resumable() bool {
+	return r.State != nil && !r.State.Done &&
+		r.State.LastCompletedIteration < r.State.MaxIterations
 }
 
 // BestScore returns the highest iteration score in the run (0..1), or -1.
@@ -43,13 +53,25 @@ func (r Run) BestScore() float64 {
 	return best
 }
 
+// Duration returns the run's total execution time as the sum of its iteration
+// durations (milliseconds). Iteration durations are populated for both live and
+// past runs, so this works without a separate run-level persistence file.
+func (r Run) Duration() int64 {
+	var total int64
+	for _, it := range r.Iterations {
+		total += it.DurationMs
+	}
+	return total
+}
+
 // Iteration is one iteration within a run (index 0 = baseline).
 type Iteration struct {
-	Index      int
-	Dir        string
-	Score      float64 // 0..1
-	Experiment string  // research agent's description of the change (iter > 0)
-	Scenarios  []Scenario
+	Index       int
+	Dir         string
+	Score       float64 // 0..1
+	DurationMs  int64   // total execution time of the iteration
+	Experiment  string  // research agent's description of the change (iter > 0)
+	Scenarios   []Scenario
 	skillMdRead bool
 	skillMd     string
 }
@@ -88,8 +110,9 @@ func (f File) Content() string {
 }
 
 type iterationResults struct {
-	Score     float64                   `json:"score"`
-	Scenarios []types.ScenarioRunResult `json:"scenarios"`
+	Score      float64                   `json:"score"`
+	DurationMs int64                     `json:"durationMs"`
+	Scenarios  []types.ScenarioRunResult `json:"scenarios"`
 }
 
 var transcriptOrder = []struct{ file, label string }{
@@ -173,6 +196,12 @@ func ListRuns(repoRoot, skill string) ([]Run, error) {
 // LoadRun reads a single run directory and its iterations.
 func LoadRun(dir string) (Run, error) {
 	run := Run{Timestamp: filepath.Base(dir), Dir: dir}
+	if b, err := os.ReadFile(filepath.Join(dir, "state.json")); err == nil {
+		var st types.RunState
+		if json.Unmarshal(b, &st) == nil {
+			run.State = &st
+		}
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return run, err
@@ -204,6 +233,7 @@ func LoadIteration(dir string, index int) Iteration {
 	if b, err := os.ReadFile(filepath.Join(dir, "results.json")); err == nil {
 		if json.Unmarshal(b, &res) == nil {
 			it.Score = res.Score / 100.0
+			it.DurationMs = res.DurationMs
 		}
 	}
 

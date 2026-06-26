@@ -38,6 +38,14 @@ var (
 	addLineStyle  = lipgloss.NewStyle().Foreground(colorAddFg)
 	delLineStyle  = lipgloss.NewStyle().Foreground(colorDelFg)
 	hunkLineStyle = lipgloss.NewStyle().Foreground(colorHunkFg)
+
+	modalBox = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorAccent).
+			Padding(1, 2)
+
+	yesStyle = lipgloss.NewStyle().Bold(true).Foreground(colorGood)
+	noStyle  = lipgloss.NewStyle().Bold(true).Foreground(colorBad)
 )
 
 // scoreStyle returns a foreground style colored for a 0..1 score.

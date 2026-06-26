@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"papi/internal/progress"
 	"papi/internal/runs"
 	"papi/internal/types"
 )
@@ -34,11 +35,11 @@ func (m *model) detailRun(r *runs.Run) string {
 	if r.BestScore() >= 0 {
 		fmt.Fprintf(&b, "best score: %s\n", scoreStyle(r.BestScore()).Render(fmt.Sprintf("%.1f%%", r.BestScore()*100)))
 	}
-	fmt.Fprintf(&b, "iterations: %d\n\n", len(r.Iterations))
+	fmt.Fprintf(&b, "iterations: %d   duration: %s\n\n", len(r.Iterations), progress.FmtDuration(r.Duration()))
 	for i := range r.Iterations {
 		it := &r.Iterations[i]
 		label := fmt.Sprintf("iteration-%03d", it.Index)
-		fmt.Fprintf(&b, "  %-22s %s\n", label, scoreStyle(it.Score).Render(fmt.Sprintf("%.1f", it.Score*100)))
+		fmt.Fprintf(&b, "  %-22s %s   %s\n", label, scoreStyle(it.Score).Render(fmt.Sprintf("%.1f", it.Score*100)), mutedStyle.Render(progress.FmtDuration(it.DurationMs)))
 	}
 	return b.String()
 }
@@ -53,6 +54,9 @@ func (m *model) detailIteration(r *row) string {
 			delta := (it.Score - r.prevIter.Score) * 100
 			fmt.Fprintf(&b, "   Δ %+.1f", delta)
 		}
+		if it.DurationMs > 0 {
+			fmt.Fprintf(&b, "   %s", progress.FmtDuration(it.DurationMs))
+		}
 		fmt.Fprintln(&b)
 	}
 	if st := m.liveStatus[r.key]; st != "" {
@@ -66,7 +70,7 @@ func (m *model) detailIteration(r *row) string {
 		fmt.Fprintf(&b, "\n%s\n", titleStyle.Render("scenarios"))
 		for i := range it.Scenarios {
 			sc := &it.Scenarios[i]
-			fmt.Fprintf(&b, "  %-30s %s\n", sc.ID, scoreStyle(sc.Score).Render(fmt.Sprintf("%.1f", sc.Score*100)))
+			fmt.Fprintf(&b, "  %-30s %s   %s\n", sc.ID, scoreStyle(sc.Score).Render(fmt.Sprintf("%.1f", sc.Score*100)), mutedStyle.Render(progress.FmtDuration(sc.Result.DurationMs)))
 		}
 	}
 
@@ -121,7 +125,7 @@ func (m *model) detailScenario(r *row) string {
 			if ev.IsLLMJudge {
 				flags += " [llm]"
 			}
-			fmt.Fprintf(&b, "  %-26s %s%s\n", ev.Name, scoreStyle(ev.Score).Render(fmt.Sprintf("%.0f", ev.Score*100)), mutedStyle.Render(flags))
+			fmt.Fprintf(&b, "  %-26s %s   %s%s\n", ev.Name, scoreStyle(ev.Score).Render(fmt.Sprintf("%.0f", ev.Score*100)), mutedStyle.Render(progress.FmtDuration(ev.DurationMs)), mutedStyle.Render(flags))
 		}
 	}
 	return b.String()
@@ -130,7 +134,7 @@ func (m *model) detailScenario(r *row) string {
 func detailEval(ev *types.EvalResult) string {
 	var b strings.Builder
 	fmt.Fprintln(&b, titleStyle.Render(ev.Name))
-	fmt.Fprintf(&b, "score: %s\n", scoreStyle(ev.Score).Render(fmt.Sprintf("%.1f", ev.Score*100)))
+	fmt.Fprintf(&b, "score: %s   duration: %s\n", scoreStyle(ev.Score).Render(fmt.Sprintf("%.1f", ev.Score*100)), progress.FmtDuration(ev.DurationMs))
 	flags := []string{}
 	if ev.Required {
 		flags = append(flags, "required")

@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"papi/internal/appconfig"
@@ -55,11 +56,12 @@ type model struct {
 	picker list.Model
 
 	// browse state
-	skillName string
-	pastRuns  []runs.Run
-	live      *runs.Run
-	liveActive bool
-	scenarioIDs []string
+	skillName     string
+	skillRunnable bool
+	pastRuns      []runs.Run
+	live          *runs.Run
+	liveActive    bool
+	scenarioIDs   []string
 
 	liveStatus map[string]string
 	streams    map[string]*strings.Builder
@@ -75,7 +77,10 @@ type model struct {
 	focus    focusPane
 	detailVP viewport.Model
 	logVP    viewport.Model
-	logs     []string
+	logs     []logEntry
+
+	logModal   bool
+	logModalVP viewport.Model
 
 	events chan progress.Event
 	done   chan error
@@ -84,9 +89,15 @@ type model struct {
 	width, height int
 	treeWidth     int
 
-	confirmStop bool
-	statusMsg   string
-	err         error
+	confirmStop      bool
+	confirmStart     bool
+	confirmResume    bool
+	confirmQuit      bool
+	confirmStartMsg  string
+	confirmResumeMsg string
+	resumeTs         string
+	statusMsg        string
+	err              error
 }
 
 type skillItem struct{ s runs.Skill }
@@ -157,10 +168,31 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.logVP = viewport.New(m.logInnerWidth(), m.logInnerHeight())
 		m.refreshDetail(true)
 		m.refreshLog()
+		if m.logModal {
+			w, h := m.logModalSize()
+			m.logModalVP = viewport.New(w, h)
+			m.setLogModalContent()
+		}
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.confirmQuit {
+			switch msg.String() {
+			case "y", "Y", "ctrl+c": // second ctrl+c = force quit
+				if m.cancel != nil {
+					m.cancel()
+				}
+				return m, tea.Quit
+			case "n", "N", "esc":
+				m.confirmQuit = false
+			}
+			return m, nil
+		}
 		if msg.String() == "ctrl+c" {
+			if m.liveActive { // run in progress → confirm first
+				m.confirmQuit = true
+				return m, nil
+			}
 			if m.cancel != nil {
 				m.cancel()
 			}
@@ -204,16 +236,10 @@ func (m *model) updatePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "q":
 			return m, tea.Quit
 		case "enter":
+			// Selecting a skill only opens its runs read-only; starting a run is
+			// an explicit, confirmed action ('r') inside the browse view.
 			if item, ok := m.picker.SelectedItem().(skillItem); ok {
-				if !item.s.Runnable {
-					m.openBrowse(item.s.Name)
-					return m, nil
-				}
-				return m, m.startRun(item.s.Name)
-			}
-		case "b":
-			if item, ok := m.picker.SelectedItem().(skillItem); ok {
-				m.openBrowse(item.s.Name)
+				m.openBrowse(item.s.Name, item.s.Runnable)
 				return m, nil
 			}
 		}
@@ -238,6 +264,39 @@ func (m *model) updateBrowse(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if m.confirmStart {
+		switch msg.String() {
+		case "y", "Y":
+			m.confirmStart = false
+			return m, m.startRun(m.skillName)
+		case "n", "N", "esc":
+			m.confirmStart = false
+		}
+		return m, nil
+	}
+
+	if m.confirmResume {
+		switch msg.String() {
+		case "y", "Y":
+			m.confirmResume = false
+			return m, m.startResume(m.skillName, m.resumeTs)
+		case "n", "N", "esc":
+			m.confirmResume = false
+		}
+		return m, nil
+	}
+
+	if m.logModal {
+		switch msg.String() {
+		case "esc", "q", "enter":
+			m.logModal = false
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.logModalVP, cmd = m.logModalVP.Update(msg)
+		return m, cmd
+	}
+
 	switch msg.String() {
 	case "q", "esc":
 		if m.liveActive {
@@ -253,6 +312,31 @@ func (m *model) updateBrowse(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "s":
 		if m.liveActive {
 			m.confirmStop = true
+		}
+		return m, nil
+	case "r":
+		switch {
+		case m.liveActive:
+			m.statusMsg = "run already in progress"
+		case !m.skillRunnable:
+			m.statusMsg = "skill has no scenarios — not runnable"
+		default:
+			cfg, err := appconfig.Build(m.repoRoot, m.skillName)
+			if err != nil {
+				m.statusMsg = err.Error()
+			} else {
+				m.confirmStartMsg = fmt.Sprintf("%s — %d iterations, $%.2f budget",
+					m.skillName, cfg.MaxIterations, cfg.MaxBudgetUSD)
+				m.confirmStart = true
+			}
+		}
+		return m, nil
+	case "c":
+		if r, ok := m.selectedResumableRun(); ok {
+			m.resumeTs = r.Timestamp
+			m.confirmResumeMsg = fmt.Sprintf("run %s — continue from iteration %d (best %.1f%%)",
+				r.Timestamp, r.State.LastCompletedIteration+1, r.State.BestScore)
+			m.confirmResume = true
 		}
 		return m, nil
 	case "g":
@@ -271,6 +355,10 @@ func (m *model) updateBrowse(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	if m.focus == paneLog {
+		if msg.String() == "enter" {
+			m.openLogModal()
+			return m, nil
+		}
 		var cmd tea.Cmd
 		m.logVP, cmd = m.logVP.Update(msg)
 		return m, cmd
@@ -304,6 +392,7 @@ func (m *model) updateBrowse(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.expanded[r.key] = !m.expanded[r.key]
 				m.rebuild(false)
 				m.selectKey(r.key)
+				m.refreshLog()
 			} else if msg.String() == "enter" {
 				m.focus = paneDetail
 			}
@@ -318,6 +407,7 @@ func (m *model) afterCursorMove() {
 	}
 	m.ensureCursorVisible()
 	m.refreshDetail(true)
+	m.refreshLog()
 }
 
 // --- run lifecycle ---
@@ -328,7 +418,7 @@ func (m *model) startRun(skill string) tea.Cmd {
 		m.err = err
 		return nil
 	}
-	m.openBrowse(skill)
+	m.openBrowse(skill, true)
 	m.live = nil
 	m.liveActive = true
 	m.follow = true
@@ -348,9 +438,53 @@ func (m *model) startRun(skill string) tea.Cmd {
 	return waitForEvent(events, done)
 }
 
-func (m *model) openBrowse(skill string) {
+// startResume continues an unfinished run (timestamp) instead of starting a fresh
+// one. The resumed run is removed from pastRuns and re-seeded as the live run when
+// the loop emits RunStarted.
+func (m *model) startResume(skill, timestamp string) tea.Cmd {
+	cfg, err := appconfig.Build(m.repoRoot, skill)
+	if err != nil {
+		m.err = err
+		return nil
+	}
+	cfg.Resume = true
+	cfg.ResumeTimestamp = timestamp
+
+	m.openBrowse(skill, true)
+	// Drop the run we're resuming from pastRuns so it isn't duplicated; it becomes
+	// the live run once RunStarted arrives.
+	filtered := m.pastRuns[:0]
+	for _, r := range m.pastRuns {
+		if r.Timestamp != timestamp {
+			filtered = append(filtered, r)
+		}
+	}
+	m.pastRuns = filtered
+
+	m.live = nil
+	m.liveActive = true
+	m.follow = true
+	m.events = make(chan progress.Event, 128)
+	m.done = make(chan error, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
+	repoRoot := m.repoRoot
+	events := m.events
+	done := m.done
+	go func() {
+		err := loop.Run(ctx, cfg, repoRoot, progress.NewChannelReporter(events), true)
+		done <- err
+		close(events)
+	}()
+	return waitForEvent(events, done)
+}
+
+func (m *model) openBrowse(skill string, runnable bool) {
 	m.mode = modeBrowse
 	m.skillName = skill
+	m.skillRunnable = runnable
+	m.confirmStart = false
 	m.focus = paneTree
 	m.cursor = 0
 	m.treeOffset = 0
@@ -370,6 +504,24 @@ func (m *model) openBrowse(skill string) {
 	m.refreshDetail(true)
 }
 
+// selectedResumableRun returns the run for the currently selected tree node when
+// that node is a (non-live) run node whose run can be resumed, and no run is active.
+func (m *model) selectedResumableRun() (*runs.Run, bool) {
+	if m.liveActive {
+		return nil, false
+	}
+	runTs, iter, scen, _ := parseSelKey(m.selectedKey)
+	if runTs == "" || iter != -1 || scen != "" {
+		return nil, false
+	}
+	for i := range m.pastRuns {
+		if m.pastRuns[i].Timestamp == runTs && m.pastRuns[i].Resumable() {
+			return &m.pastRuns[i], true
+		}
+	}
+	return nil, false
+}
+
 func (m *model) reloadSkills() {
 	skills, _ := runs.ListSkills(m.repoRoot)
 	items := make([]list.Item, len(skills))
@@ -385,7 +537,18 @@ func (m *model) applyEvent(e progress.Event) {
 	switch ev := e.(type) {
 	case progress.RunStarted:
 		m.scenarioIDs = ev.ScenarioIDs
-		m.live = &runs.Run{Timestamp: ev.Timestamp}
+		if ev.ResumeFrom > 0 {
+			// Resuming: load the already-completed iterations from disk so the run's
+			// history stays visible while the remaining iterations stream in.
+			runDir := filepath.Join(m.repoRoot, ".papi", "skills", m.skillName, "runs", ev.Timestamp)
+			if r, err := runs.LoadRun(runDir); err == nil {
+				m.live = &r
+			} else {
+				m.live = &runs.Run{Timestamp: ev.Timestamp}
+			}
+		} else {
+			m.live = &runs.Run{Timestamp: ev.Timestamp}
+		}
 		rk := runKey(ev.Timestamp)
 		m.liveStatus[rk] = "running"
 		m.expanded[rk] = true
@@ -448,6 +611,7 @@ func (m *model) applyEvent(e progress.Event) {
 	case progress.IterationDone:
 		if it := m.liveIter(ev.Iter); it != nil {
 			it.Score = ev.Score
+			it.DurationMs = ev.DurationMs
 		}
 		delete(m.liveStatus, iterKey(runKey(m.live.Timestamp), ev.Iter))
 
@@ -460,7 +624,17 @@ func (m *model) applyEvent(e progress.Event) {
 
 	case progress.LogLine:
 		if t := strings.TrimSpace(ev.Text); t != "" {
-			m.appendLog(t)
+			runTs := ""
+			if m.live != nil {
+				runTs = m.live.Timestamp
+			}
+			m.appendLog(logEntry{
+				runTs:      runTs,
+				iter:       ev.Iter,
+				scenarioID: ev.ScenarioID,
+				evalID:     ev.EvalID,
+				text:       t,
+			})
 		}
 	}
 
@@ -474,6 +648,7 @@ func (m *model) applyEvent(e progress.Event) {
 		m.selectKey(keepTop)
 	}
 	m.refreshDetail(false)
+	m.refreshLog()
 
 	// Keep streamed output in view while following the live node.
 	if _, ok := e.(progress.StreamChunk); ok && m.follow {
@@ -627,27 +802,161 @@ func (m *model) logInnerWidth() int {
 
 func (m *model) logInnerHeight() int { return logStripHeight }
 
-func (m *model) appendLog(line string) {
-	for _, l := range strings.Split(line, "\n") {
-		m.logs = append(m.logs, l)
+// logModalSize returns the inner width/height of the fullscreen log viewport,
+// leaving room for the modalBox border + Padding(1,2), a title line, and a hint line.
+func (m *model) logModalSize() (w, h int) {
+	w = m.width - 8
+	if w < 20 {
+		w = 20
+	}
+	// border(2) + vertical padding(2) + title(1) + blank(1) + blank(1) + hint(1) = 8
+	h = m.height - 8
+	if h < 3 {
+		h = 3
+	}
+	return w, h
+}
+
+// openLogModal builds the fullscreen scrollable log overlay from the same
+// node-filtered content as the strip, scrolled to the newest line.
+func (m *model) openLogModal() {
+	w, h := m.logModalSize()
+	m.logModalVP = viewport.New(w, h)
+	m.setLogModalContent()
+	m.logModal = true
+}
+
+func (m *model) setLogModalContent() {
+	content, shown := m.filteredLogContent()
+	if shown == 0 {
+		content = mutedStyle.Render("(no output)")
+	}
+	m.logModalVP.SetContent(content)
+	m.logModalVP.GotoBottom()
+}
+
+// logEntry is one captured log line plus the run-hierarchy scope it belongs to,
+// so the log panel can be filtered to the currently selected tree node.
+type logEntry struct {
+	runTs      string // m.live.Timestamp at append time ("" = global/pre-run)
+	iter       int    // iteration index; -1 = run-level
+	scenarioID string // "" = not scenario-specific
+	evalID     string // "" = not eval-specific
+	text       string
+}
+
+func (m *model) appendLog(e logEntry) {
+	for _, l := range strings.Split(e.text, "\n") {
+		le := e
+		le.text = l
+		m.logs = append(m.logs, le)
 	}
 	const maxLogs = 500
 	if len(m.logs) > maxLogs {
 		m.logs = m.logs[len(m.logs)-maxLogs:]
 	}
 	m.refreshLog()
-	m.logVP.GotoBottom()
 }
 
+// parseSelKey decodes a tree node key (r:ts/i:idx/s:id/e:evalid, f: segments
+// ignored) into the scope it represents. iter is -1 when the key has no i:
+// segment (the run node ⇒ no iteration constraint).
+func parseSelKey(key string) (runTs string, iter int, scen, eval string) {
+	iter = -1
+	for _, part := range strings.Split(key, "/") {
+		switch {
+		case strings.HasPrefix(part, "r:"):
+			runTs = part[2:]
+		case strings.HasPrefix(part, "i:"):
+			iter, _ = strconv.Atoi(part[2:])
+		case strings.HasPrefix(part, "s:"):
+			scen = part[2:]
+		case strings.HasPrefix(part, "e:"):
+			eval = part[2:]
+		}
+	}
+	return
+}
+
+// refreshLog re-renders the log panel, filtered to the selected node's scope. An
+// entry shows when it agrees with every constraint the node sets; a node higher
+// in the hierarchy (e.g. the run) sets fewer constraints and so shows more.
 func (m *model) refreshLog() {
 	if m.logVP.Width == 0 {
 		return
 	}
-	if len(m.logs) == 0 {
+	content, shown := m.filteredLogContent()
+	if shown == 0 {
 		m.logVP.SetContent(mutedStyle.Render("(no output)"))
 		return
 	}
-	m.logVP.SetContent(strings.Join(m.logs, "\n"))
+	m.logVP.SetContent(content)
+	m.logVP.GotoBottom()
+}
+
+// filteredLogContent renders the log lines visible for the selected node's scope
+// (the same filter the strip uses), returning the joined text and the count shown.
+// Shared by the inline strip (refreshLog) and the fullscreen log modal.
+func (m *model) filteredLogContent() (string, int) {
+	nodeRunTs, nodeIter, nodeScen, nodeEval := parseSelKey(m.selectedKey)
+	var b strings.Builder
+	shown := 0
+	for _, e := range m.logs {
+		if nodeIter >= 0 && e.iter != nodeIter {
+			continue
+		}
+		if nodeScen != "" && e.scenarioID != nodeScen {
+			continue
+		}
+		if nodeEval != "" && e.evalID != nodeEval {
+			continue
+		}
+		// Past-run nodes have no logs; the live run shows its own; pre-run global
+		// lines (no runTs) always show.
+		if e.runTs != "" && nodeRunTs != "" && e.runTs != nodeRunTs {
+			continue
+		}
+		if shown > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(formatLogLine(e))
+		shown++
+	}
+	return b.String(), shown
+}
+
+// formatLogLine renders a log entry with compact, dimmed scope tags: [run <short>]
+// always, then [iter N], [scenario], [eval] only when that level applies.
+func formatLogLine(e logEntry) string {
+	var tags []string
+	if e.runTs != "" {
+		tags = append(tags, "run "+shortRunTag(e.runTs))
+	}
+	if e.iter >= 0 {
+		tags = append(tags, fmt.Sprintf("iter %d", e.iter))
+	}
+	if e.scenarioID != "" {
+		tags = append(tags, e.scenarioID)
+	}
+	if e.evalID != "" {
+		tags = append(tags, e.evalID)
+	}
+	if len(tags) == 0 {
+		return e.text
+	}
+	prefix := ""
+	for _, t := range tags {
+		prefix += mutedStyle.Render("["+t+"]") + " "
+	}
+	return prefix + e.text
+}
+
+// shortRunTag abbreviates a long Unix-millis run timestamp to its last 4 digits.
+func shortRunTag(ts string) string {
+	if len(ts) > 4 {
+		return ts[len(ts)-4:]
+	}
+	return ts
 }
 
 func (m *model) View() string {
@@ -657,7 +966,82 @@ func (m *model) View() string {
 	if m.mode == modePicker {
 		return m.picker.View()
 	}
-	return m.browseView()
+	view := m.browseView()
+	if m.confirmStart || m.confirmResume || m.confirmStop || m.confirmQuit {
+		view = overlayCenter(view, m.modalView(), m.width, m.height)
+	} else if m.logModal {
+		view = overlayCenter(view, m.logModalView(), m.width, m.height)
+	}
+	return view
+}
+
+// modalView builds the centered confirmation dialog for starting or stopping a run.
+func (m *model) modalView() string {
+	title := "Start a run?"
+	body := m.confirmStartMsg
+	if m.confirmResume {
+		title = "Continue run?"
+		body = m.confirmResumeMsg
+	}
+	if m.confirmStop {
+		title = "Stop run?"
+		body = "Stop the running loop?"
+	}
+	if m.confirmQuit {
+		title = "Stop run and quit?"
+		body = "A run is in progress. Quitting will stop it."
+	}
+
+	width := 56
+	if m.width-8 < width {
+		width = m.width - 8
+	}
+	if width < 20 {
+		width = 20
+	}
+
+	prompt := yesStyle.Render("[y] Yes") + "    " + noStyle.Render("[n] No") +
+		"    " + mutedStyle.Render("(esc cancel)")
+	inner := lipgloss.NewStyle().Width(width).Render(
+		titleStyle.Render(title) + "\n\n" + body + "\n\n" + prompt)
+	return modalBox.Render(inner)
+}
+
+// logModalView builds the centered, near-fullscreen scrollable log overlay.
+func (m *model) logModalView() string {
+	w, _ := m.logModalSize()
+	title := titleStyle.Render("log · " + m.skillName)
+	hint := mutedStyle.Render("↑/↓ pgup/pgdn scroll · esc close")
+	inner := lipgloss.NewStyle().Width(w).Render(
+		title + "\n\n" + m.logModalVP.View() + "\n\n" + hint)
+	return modalBox.Render(inner)
+}
+
+// overlayCenter composites box centered over base (sized w×h) by replacing the
+// center band of rows with the box's lines. Whole-row replacement keeps the
+// surrounding tree/detail visible above and below without intra-line ANSI splicing.
+func overlayCenter(base, box string, w, h int) string {
+	lines := strings.Split(base, "\n")
+	for len(lines) < h {
+		lines = append(lines, "")
+	}
+	boxLines := strings.Split(box, "\n")
+	left := (w - lipgloss.Width(box)) / 2
+	if left < 0 {
+		left = 0
+	}
+	top := (h - len(boxLines)) / 2
+	if top < 0 {
+		top = 0
+	}
+	pad := strings.Repeat(" ", left)
+	for i, bl := range boxLines {
+		row := top + i
+		if row >= 0 && row < len(lines) {
+			lines[row] = pad + bl
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m *model) browseView() string {
@@ -704,12 +1088,17 @@ func (m *model) browseView() string {
 }
 
 func (m *model) footer() string {
-	if m.confirmStop {
-		return footerStyle.Render("Stop the running loop? (y/n)")
-	}
 	keys := "↑/↓ move · space fold · enter open · tab pane · g live · q back"
+	if m.focus == paneLog {
+		keys += " · enter expand"
+	}
 	if m.liveActive {
 		keys += " · s stop"
+	} else if m.skillRunnable {
+		keys += " · r run"
+		if _, ok := m.selectedResumableRun(); ok {
+			keys += " · c continue"
+		}
 	}
 	line := footerStyle.Render(keys)
 	if m.statusMsg != "" {

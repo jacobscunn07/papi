@@ -53,19 +53,19 @@ func (r *CLIReporter) Emit(e Event) {
 
 	case IterationDone:
 		if ev.Iter == 0 {
-			fmt.Printf("  Aggregate: %s  |  Cost: $%.4f\n", pct(ev.Score), ev.Cost)
+			fmt.Printf("  Aggregate: %s  |  Cost: $%.4f  |  %s\n", pct(ev.Score), ev.Cost, FmtDuration(ev.DurationMs))
 		} else {
 			deltaDisplay := pct(ev.Delta)
 			if ev.Delta > 0 {
 				deltaDisplay = "+" + deltaDisplay
 			}
-			fmt.Printf("  Aggregate: %s  (Δ %s)  |  Cost: $%.4f\n", pct(ev.Score), deltaDisplay, ev.Cost)
+			fmt.Printf("  Aggregate: %s  (Δ %s)  |  Cost: $%.4f  |  %s\n", pct(ev.Score), deltaDisplay, ev.Cost, FmtDuration(ev.DurationMs))
 		}
 		printScenarioBreakdown(ev.Results)
 
 	case RunDone:
 		fmt.Printf("\n%s\n", bar)
-		fmt.Printf("Done. Best score: %s | Total cost: $%.4f\n", pct(ev.Best), ev.Cost)
+		fmt.Printf("Done. Best score: %s | Total cost: $%.4f | Duration: %s\n", pct(ev.Best), ev.Cost, FmtDuration(ev.DurationMs))
 		if ev.Tag != "" {
 			fmt.Printf("Tagged: %s\n", ev.Tag)
 		}
@@ -111,7 +111,7 @@ func printEvalGroup(evals []types.EvalResult) {
 		if e.IsLLMJudge {
 			name += " [llm]"
 		}
-		fmt.Printf("    %s %-36s %6.1f   %q\n", branch, name, e.Score*100, e.Reasoning)
+		fmt.Printf("    %s %-36s %6.1f  %7s   %q\n", branch, name, e.Score*100, FmtDuration(e.DurationMs), e.Reasoning)
 	}
 }
 
@@ -149,6 +149,6 @@ func printScenarioBreakdown(results []types.ScenarioRunResult) {
 		if i == len(results)-1 {
 			branch = "└─"
 		}
-		fmt.Printf("    %s %-32s %6.1f\n", branch, r.Scenario.ID, r.ScenarioScore*100)
+		fmt.Printf("    %s %-32s %6.1f  %7s\n", branch, r.Scenario.ID, r.ScenarioScore*100, FmtDuration(r.DurationMs))
 	}
 }

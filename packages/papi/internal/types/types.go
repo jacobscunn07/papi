@@ -60,14 +60,14 @@ type ScenarioFile struct {
 
 // ClaudeJsonOutput is the JSON structure returned by `claude --output-format json`.
 type ClaudeJsonOutput struct {
-	Type        string  `json:"type"`
-	Subtype     string  `json:"subtype"`
-	IsError     bool    `json:"is_error"`
-	Result      string  `json:"result"`
-	SessionID   string  `json:"session_id"`
+	Type         string  `json:"type"`
+	Subtype      string  `json:"subtype"`
+	IsError      bool    `json:"is_error"`
+	Result       string  `json:"result"`
+	SessionID    string  `json:"session_id"`
 	TotalCostUSD float64 `json:"total_cost_usd"`
-	NumTurns    int     `json:"num_turns"`
-	Usage       struct {
+	NumTurns     int     `json:"num_turns"`
+	Usage        struct {
 		InputTokens          int `json:"input_tokens"`
 		OutputTokens         int `json:"output_tokens"`
 		CacheReadInputTokens int `json:"cache_read_input_tokens"`
@@ -97,6 +97,7 @@ type EvalResult struct {
 	Reasoning  string  `json:"reasoning"`
 	Required   bool    `json:"required,omitempty"`
 	IsLLMJudge bool    `json:"isLLMJudge,omitempty"`
+	DurationMs int64   `json:"durationMs,omitempty"`
 }
 
 // Eval is the interface every evaluator must implement.
@@ -118,20 +119,38 @@ type ScenarioRunResult struct {
 	DurationMs       int64             `json:"durationMs"`
 }
 
+// RunState is the run-level checkpoint persisted as state.json at the run root.
+// It captures the in-memory loop state that would otherwise be lost on interrupt,
+// so a run can be resumed from the next iteration instead of restarting at baseline.
+type RunState struct {
+	Skill                  string  `json:"skill"`
+	Timestamp              string  `json:"timestamp"`
+	BestScore              float64 `json:"bestScore"` // 0..100
+	BestSha                string  `json:"bestSha"`
+	LastCompletedIteration int     `json:"lastCompletedIteration"` // 0 = baseline done
+	TotalCost              float64 `json:"totalCost"`
+	MaxIterations          int     `json:"maxIterations"`
+	Budget                 float64 `json:"budget"`
+	Done                   bool    `json:"done"` // true once the run reached its natural end
+	UpdatedAt              string  `json:"updatedAt"`
+}
+
 // ResearchConfig holds all runtime configuration for the loop.
 type ResearchConfig struct {
-	SkillName      string
-	SkillDir       string
-	ScenariosDir   string
-	CustomEvalsDir string
-	MaxIterations  int
-	MaxBudgetUSD   float64
-	Tags           []string
-	DryRun         bool
-	ScenarioModel string // Invocation Phase model — description-only check (default: claude-haiku-4-5-20251001)
-	QualityModel  string // Quality Phase model — full skill execution (default: claude-sonnet-4-6)
-	ResearchModel string // Research agent improvement loop (default: claude-opus-4-7)
-	MaxRuns          int     // max runs to retain per skill; 0 = keep all
-	LLMJudgeWeight   float64 // category weight for LLM judge evals (default 0.30)
+	SkillName         string
+	SkillDir          string
+	ScenariosDir      string
+	CustomEvalsDir    string
+	MaxIterations     int
+	MaxBudgetUSD      float64
+	Tags              []string
+	DryRun            bool
+	Resume            bool    // resume an unfinished run instead of starting fresh
+	ResumeTimestamp   string  // specific run to resume ("" = latest resumable)
+	ScenarioModel     string  // Invocation Phase model — description-only check (default: claude-haiku-4-5-20251001)
+	QualityModel      string  // Quality Phase model — full skill execution (default: claude-sonnet-4-6)
+	ResearchModel     string  // Research agent improvement loop (default: claude-opus-4-7)
+	MaxRuns           int     // max runs to retain per skill; 0 = keep all
+	LLMJudgeWeight    float64 // category weight for LLM judge evals (default 0.30)
 	NonLLMJudgeWeight float64 // category weight for non-LLM judge evals (default 0.70)
 }

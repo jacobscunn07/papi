@@ -55,6 +55,7 @@ func init() {
 	flags.Float64("budget", 5.0, "Max spend in USD")
 	flags.String("tags", "", "Filter scenarios by comma-separated tags")
 	flags.Bool("dry-run", false, "Run evals without modifying SKILL.md or committing")
+	flags.Bool("resume", false, "Resume the latest unfinished run for this skill instead of starting fresh")
 	flags.String("scenario-model", "claude-haiku-4-5-20251001", "Model for invocation check (description-only)")
 	flags.String("quality-model", "claude-sonnet-4-6", "Model for quality check (full skill execution)")
 	flags.String("research-model", "claude-opus-4-7", "Model for research agent")

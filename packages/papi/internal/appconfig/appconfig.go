@@ -77,6 +77,7 @@ func Build(repoRoot, skillName string) (*types.ResearchConfig, error) {
 		MaxBudgetUSD:      viper.GetFloat64("budget"),
 		Tags:              tags,
 		DryRun:            viper.GetBool("dry-run"),
+		Resume:            viper.GetBool("resume"),
 		ScenarioModel:     viper.GetString("scenario-model"),
 		QualityModel:      viper.GetString("quality-model"),
 		ResearchModel:     viper.GetString("research-model"),

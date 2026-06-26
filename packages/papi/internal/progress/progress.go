@@ -4,7 +4,31 @@
 // stream events into a bubbletea program.
 package progress
 
-import "papi/internal/types"
+import (
+	"fmt"
+
+	"papi/internal/types"
+)
+
+// FmtDuration renders a millisecond duration compactly for display, e.g. "820ms",
+// "4.2s", "3m05s", "1h02m". A non-positive duration renders as "—".
+func FmtDuration(ms int64) string {
+	if ms <= 0 {
+		return "—"
+	}
+	switch {
+	case ms < 1000:
+		return fmt.Sprintf("%dms", ms)
+	case ms < 60_000:
+		return fmt.Sprintf("%.1fs", float64(ms)/1000)
+	case ms < 3_600_000:
+		s := ms / 1000
+		return fmt.Sprintf("%dm%02ds", s/60, s%60)
+	default:
+		m := ms / 60_000
+		return fmt.Sprintf("%dh%02dm", m/60, m%60)
+	}
+}
 
 // Phase identifies which sub-step of a scenario is currently executing.
 type Phase string
@@ -26,6 +50,7 @@ type RunStarted struct {
 	MaxIterations int
 	Budget        float64
 	ScenarioIDs   []string
+	ResumeFrom    int // 0 = fresh start; >0 = iterations 0..ResumeFrom-1 already completed
 }
 
 // IterationStarted is emitted at the start of each iteration (0 = baseline).
@@ -78,24 +103,34 @@ type ScenarioDone struct {
 // IterationDone is emitted when an iteration completes and has been scored.
 // Iter 0 is the baseline (Delta is not meaningful).
 type IterationDone struct {
-	Iter     int
-	Score    float64
-	Delta    float64
-	Improved bool
-	Cost     float64
-	Results  []types.ScenarioRunResult
+	Iter       int
+	Score      float64
+	Delta      float64
+	Improved   bool
+	Cost       float64
+	DurationMs int64
+	Results    []types.ScenarioRunResult
 }
 
 // RunDone is emitted once at the end of a run.
 type RunDone struct {
-	Best  float64
-	Cost  float64
-	Tag   string
-	Error string
+	Best       float64
+	Cost       float64
+	DurationMs int64
+	Tag        string
+	Error      string
 }
 
-// LogLine carries an arbitrary status line (cost notices, reverts, etc.).
-type LogLine struct{ Text string }
+// LogLine carries an arbitrary status line (cost notices, reverts, etc.). The
+// Iter/ScenarioID/EvalID fields scope the line to a node in the run hierarchy so
+// consumers (the TUI) can filter logs by the selected node; they are normally
+// populated by a scoped reporter (see WithScope) rather than at the emit site.
+type LogLine struct {
+	Text       string
+	Iter       int    // iteration index; -1 when not tied to an iteration
+	ScenarioID string // "" when not scenario-specific
+	EvalID     string // "" when not eval-specific
+}
 
 func (RunStarted) isEvent()        {}
 func (IterationStarted) isEvent()  {}
@@ -126,6 +161,36 @@ func NewChannelReporter(ch chan<- Event) *ChannelReporter {
 }
 
 func (r *ChannelReporter) Emit(e Event) { r.ch <- e }
+
+// scopedReporter enriches LogLine events with hierarchy context (iteration,
+// scenario, eval) before forwarding them to an inner reporter. All other event
+// types pass through untouched, since they already carry their own identifiers.
+type scopedReporter struct {
+	inner      Reporter
+	iter       int
+	scenarioID string
+	evalID     string
+}
+
+func (r scopedReporter) Emit(e Event) {
+	if ll, ok := e.(LogLine); ok {
+		ll.Iter, ll.ScenarioID, ll.EvalID = r.iter, r.scenarioID, r.evalID
+		r.inner.Emit(ll)
+		return
+	}
+	r.inner.Emit(e)
+}
+
+// WithScope returns a reporter that tags every LogLine it forwards with the given
+// run-hierarchy scope. It unwraps any existing scope first so wrapping is always a
+// single level over the true base reporter — a more-specific scope can never be
+// clobbered by a less-specific outer one.
+func WithScope(r Reporter, iter int, scenarioID, evalID string) Reporter {
+	if s, ok := r.(scopedReporter); ok {
+		r = s.inner
+	}
+	return scopedReporter{inner: r, iter: iter, scenarioID: scenarioID, evalID: evalID}
+}
 
 // NopReporter discards all events.
 type NopReporter struct{}

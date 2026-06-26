@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"papi/internal/progress"
 	"papi/internal/runs"
 	"papi/internal/types"
 )
@@ -37,11 +38,11 @@ type row struct {
 	file     *runs.File
 }
 
-func runKey(ts string) string             { return "r:" + ts }
-func iterKey(rk string, idx int) string    { return fmt.Sprintf("%s/i:%d", rk, idx) }
-func scenKey(ik, id string) string         { return ik + "/s:" + id }
-func evalKey(sk, id string) string         { return sk + "/e:" + id }
-func fileKey(sk, label string) string      { return sk + "/f:" + label }
+func runKey(ts string) string           { return "r:" + ts }
+func iterKey(rk string, idx int) string { return fmt.Sprintf("%s/i:%d", rk, idx) }
+func scenKey(ik, id string) string      { return ik + "/s:" + id }
+func evalKey(sk, id string) string      { return sk + "/e:" + id }
+func fileKey(sk, label string) string   { return sk + "/f:" + label }
 
 // buildRows flattens the visible tree given the current expansion state. The live
 // run (if any) is listed first, then past runs newest-first.
@@ -54,6 +55,14 @@ func (m *model) buildRows() []row {
 		badge := ""
 		if live {
 			badge = m.liveStatus[rk]
+		} else if d := r.Duration(); d > 0 {
+			badge = progress.FmtDuration(d)
+		}
+		if !live && r.Resumable() {
+			if badge != "" {
+				badge += "  "
+			}
+			badge += "⏸ resumable"
 		}
 		rows = append(rows, row{
 			key: rk, depth: 0, kind: kindRun,
@@ -95,13 +104,21 @@ func (m *model) emitIteration(rows *[]row, rk string, r *runs.Run, it *runs.Iter
 		name += " (baseline)"
 	}
 	badge := m.liveStatus[ik]
-	if badge == "" && prev != nil && it.Score >= 0 && prev.Score >= 0 {
-		delta := (it.Score - prev.Score) * 100
-		sign := "+"
-		if delta < 0 {
-			sign = ""
+	if badge == "" {
+		if prev != nil && it.Score >= 0 && prev.Score >= 0 {
+			delta := (it.Score - prev.Score) * 100
+			sign := "+"
+			if delta < 0 {
+				sign = ""
+			}
+			badge = fmt.Sprintf("Δ%s%.1f", sign, delta)
 		}
-		badge = fmt.Sprintf("Δ%s%.1f", sign, delta)
+		if it.DurationMs > 0 {
+			if badge != "" {
+				badge += "  "
+			}
+			badge += progress.FmtDuration(it.DurationMs)
+		}
 	}
 	*rows = append(*rows, row{
 		key: ik, depth: 1, kind: kindIteration,
