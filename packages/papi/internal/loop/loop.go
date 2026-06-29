@@ -468,28 +468,7 @@ func snapshotSkillMd(skillDir, iterDir string) {
 // stream is true, Claude output is streamed live via stream-json. Cancelling ctx
 // stops the loop gracefully at the next scenario/iteration boundary.
 func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, rep progress.Reporter, stream bool) error {
-	// Scope all run-level logs to iter -1 so they read as run-level (not iteration
-	// 0). Per-iteration and per-scenario scopes are derived from this as we descend.
-	rep = progress.WithScope(rep, -1, "", "")
-	release, err := acquireLock(repoRoot, cfg.SkillName, rep)
-	if err != nil {
-		return err
-	}
-	defer release()
-
-	scenarios, hooks, hooksBaseDir, err := loadScenarios(cfg.ScenariosDir, cfg.Tags)
-	if err != nil {
-		return fmt.Errorf("load scenarios: %w", err)
-	}
-	ids := make([]string, len(scenarios))
-	for i, s := range scenarios {
-		ids[i] = s.ID
-	}
-
-	evalList := evals.NewRegistry(cfg.CustomEvalsDir)
-	git := researchgit.New(repoRoot)
 	runStart := time.Now()
-	var totalCost float64
 
 	// Resolve the run to write into: a fresh timestamp, or the latest resumable run.
 	var runTimestamp string
@@ -507,6 +486,34 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, rep pr
 	}
 	runDir := runDirPath(repoRoot, cfg.SkillName, runTimestamp)
 	skillMdPath := filepath.Join(cfg.SkillDir, "SKILL.md")
+
+	// Persist LogLine events to the run dir so past runs can replay their output.
+	// The tee wraps the raw reporter; WithScope layers on top so each line it sees
+	// already carries its final iteration/scenario/eval scope.
+	logTee := progress.NewLogTee(rep, filepath.Join(runDir, "logs.jsonl"))
+	defer logTee.Close()
+	// Scope all run-level logs to iter -1 so they read as run-level (not iteration
+	// 0). Per-iteration and per-scenario scopes are derived from this as we descend.
+	rep = progress.WithScope(logTee, -1, "", "")
+
+	release, err := acquireLock(repoRoot, cfg.SkillName, rep)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	scenarios, hooks, hooksBaseDir, err := loadScenarios(cfg.ScenariosDir, cfg.Tags)
+	if err != nil {
+		return fmt.Errorf("load scenarios: %w", err)
+	}
+	ids := make([]string, len(scenarios))
+	for i, s := range scenarios {
+		ids[i] = s.ID
+	}
+
+	evalList := evals.NewRegistry(cfg.CustomEvalsDir)
+	git := researchgit.New(repoRoot)
+	var totalCost float64
 
 	resumeFrom := 0
 	if resuming {

@@ -6,9 +6,11 @@ package tui
 import (
 	"context"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"papi/internal/appconfig"
 	"papi/internal/loop"
@@ -66,6 +68,9 @@ type model struct {
 	liveStatus map[string]string
 	streams    map[string]*strings.Builder
 
+	spinnerIdx int // animates while a run is live
+	totalIters int // configured max iterations for the live run
+
 	expanded    map[string]bool
 	rows        []row
 	cursor      int
@@ -114,6 +119,74 @@ func (i skillItem) Description() string {
 }
 func (i skillItem) FilterValue() string { return i.s.Name }
 
+// skillDelegate renders each picker row in the instrument identity: a bold name
+// over a muted meta line carrying the best score and a mini score-trajectory
+// sparkline of the skill's most recent run.
+type skillDelegate struct{}
+
+func (skillDelegate) Height() int                         { return 2 }
+func (skillDelegate) Spacing() int                        { return 1 }
+func (skillDelegate) Update(tea.Msg, *list.Model) tea.Cmd { return nil }
+
+func (skillDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
+	it, ok := item.(skillItem)
+	if !ok {
+		return
+	}
+	s := it.s
+	width := m.Width()
+	clip := lipgloss.NewStyle().MaxWidth(width)
+
+	// Title line — selected rows get the same cyan bar as the browse tree.
+	var title string
+	if index == m.Index() {
+		bar := "  " + s.Name
+		if w := lipgloss.Width(bar); w < width {
+			bar += strings.Repeat(" ", width-w)
+		}
+		title = selectedRowStyle.Render(bar)
+	} else {
+		title = "  " + valueStyle.Render(s.Name)
+	}
+
+	// Meta line.
+	var meta string
+	switch {
+	case !s.Runnable:
+		meta = mutedStyle.Render("not runnable")
+	case s.LastRun == "":
+		meta = mutedStyle.Render("runnable · no runs yet")
+	default:
+		meta = mutedStyle.Render("best ") +
+			scoreStyle(s.BestScore).Render(fmt.Sprintf("%.1f%%", s.BestScore*100))
+		if spark := sparkline(s.Trajectory, nil); spark != "" {
+			meta += "  " + spark
+		}
+		meta += mutedStyle.Render("  last run " + s.LastRun)
+	}
+
+	fmt.Fprint(w, clip.Render(title)+"\n"+clip.Render("    "+meta))
+}
+
+// pickerView frames the skill list with the same header/footer language as the
+// browse screen so the two screens share one identity.
+func (m *model) pickerView() string {
+	title := lipgloss.NewStyle().Foreground(colorAccent).Render("▌") +
+		valueStyle.Render(" papi") + mutedStyle.Render(" · select a skill")
+	runnable := 0
+	for _, it := range m.picker.Items() {
+		if s, ok := it.(skillItem); ok && s.s.Runnable {
+			runnable++
+		}
+	}
+	// Second header line keeps the picker the same height as the browse ribbon, so
+	// the panel doesn't jump a row when switching screens.
+	tagline := mutedStyle.Render("  self-improving skills via scored autoresearch")
+	panel := titledPanel("skills", fmt.Sprintf("%d runnable", runnable), m.picker.View(), m.width-2, true)
+	help := footerStyle.Render("↑/↓ move · / filter · enter open · q quit")
+	return title + "\n" + tagline + "\n" + panel + "\n" + help
+}
+
 func newModel(repoRoot string) (*model, error) {
 	skills, err := runs.ListSkills(repoRoot)
 	if err != nil {
@@ -123,10 +196,17 @@ func newModel(repoRoot string) (*model, error) {
 	for i, s := range skills {
 		items[i] = skillItem{s}
 	}
-	l := list.New(items, list.NewDefaultDelegate(), 0, 0)
-	l.Title = "papi — select a skill"
+	l := list.New(items, skillDelegate{}, 0, 0)
+	l.SetShowTitle(false) // we render our own instrument header
+	l.SetShowHelp(false)  // and our own footer
 	l.SetShowStatusBar(false)
 	l.SetFilteringEnabled(true)
+	// Fold the list chrome into the instrument palette.
+	l.Styles.FilterPrompt = l.Styles.FilterPrompt.Foreground(colorAccent)
+	l.Styles.FilterCursor = l.Styles.FilterCursor.Foreground(colorAccent)
+	l.Styles.NoItems = l.Styles.NoItems.Foreground(colorMuted)
+	l.Styles.ActivePaginationDot = l.Styles.ActivePaginationDot.Foreground(colorAccent)
+	l.Styles.InactivePaginationDot = l.Styles.InactivePaginationDot.Foreground(colorBorder)
 
 	return &model{
 		repoRoot:   repoRoot,
@@ -144,6 +224,12 @@ func (m *model) Init() tea.Cmd { return nil }
 
 type evMsg struct{ e progress.Event }
 type runClosedMsg struct{ err error }
+type spinnerTickMsg struct{}
+
+// tickSpinner schedules the next spinner frame.
+func tickSpinner() tea.Cmd {
+	return tea.Tick(time.Second/10, func(time.Time) tea.Msg { return spinnerTickMsg{} })
+}
 
 func waitForEvent(events chan progress.Event, done chan error) tea.Cmd {
 	return func() tea.Msg {
@@ -163,9 +249,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.treeWidth < 28 {
 			m.treeWidth = 28
 		}
-		m.picker.SetSize(msg.Width, msg.Height-1)
+		pickerH := msg.Height - 5 // identity + tagline + top border + bottom border + footer
+		if pickerH < 1 {
+			pickerH = 1
+		}
+		pickerW := msg.Width - 2 // list sits inside the panel's left/right borders
+		if pickerW < 1 {
+			pickerW = 1
+		}
+		m.picker.SetSize(pickerW, pickerH)
 		m.detailVP = viewport.New(m.detailInnerWidth(), m.paneInnerHeight())
-		m.logVP = viewport.New(m.logInnerWidth(), m.logInnerHeight())
+		m.logVP = viewport.New(m.detailInnerWidth(), m.logInnerHeight())
 		m.refreshDetail(true)
 		m.refreshLog()
 		if m.logModal {
@@ -202,6 +296,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updatePicker(msg)
 		}
 		return m.updateBrowse(msg)
+
+	case spinnerTickMsg:
+		if !m.liveActive {
+			return m, nil // stop ticking once the run ends
+		}
+		m.spinnerIdx++
+		return m, tickSpinner()
 
 	case evMsg:
 		m.applyEvent(msg.e)
@@ -422,6 +523,7 @@ func (m *model) startRun(skill string) tea.Cmd {
 	m.live = nil
 	m.liveActive = true
 	m.follow = true
+	m.totalIters = cfg.MaxIterations
 	m.events = make(chan progress.Event, 128)
 	m.done = make(chan error, 1)
 
@@ -435,7 +537,7 @@ func (m *model) startRun(skill string) tea.Cmd {
 		done <- err
 		close(events)
 	}()
-	return waitForEvent(events, done)
+	return tea.Batch(waitForEvent(events, done), tickSpinner())
 }
 
 // startResume continues an unfinished run (timestamp) instead of starting a fresh
@@ -464,6 +566,7 @@ func (m *model) startResume(skill, timestamp string) tea.Cmd {
 	m.live = nil
 	m.liveActive = true
 	m.follow = true
+	m.totalIters = cfg.MaxIterations
 	m.events = make(chan progress.Event, 128)
 	m.done = make(chan error, 1)
 
@@ -477,7 +580,7 @@ func (m *model) startResume(skill, timestamp string) tea.Cmd {
 		done <- err
 		close(events)
 	}()
-	return waitForEvent(events, done)
+	return tea.Batch(waitForEvent(events, done), tickSpinner())
 }
 
 func (m *model) openBrowse(skill string, runnable bool) {
@@ -575,12 +678,12 @@ func (m *model) applyEvent(e progress.Event) {
 
 	case progress.ScenarioStarted:
 		sk := scenKey(iterKey(runKey(m.live.Timestamp), ev.Iter), ev.ID)
-		m.liveStatus[sk] = "invocation…"
+		m.liveStatus[sk] = "invocation"
 		m.setActive(sk)
 
 	case progress.PhaseChanged:
 		sk := scenKey(iterKey(runKey(m.live.Timestamp), ev.Iter), ev.ID)
-		m.liveStatus[sk] = string(ev.Phase) + "…"
+		m.liveStatus[sk] = string(ev.Phase)
 
 	case progress.StreamChunk:
 		sk := scenKey(iterKey(runKey(m.live.Timestamp), ev.Iter), ev.ID)
@@ -590,7 +693,7 @@ func (m *model) applyEvent(e progress.Event) {
 			m.streams[sk] = buf
 		}
 		buf.WriteString(ev.Text)
-		m.liveStatus[sk] = string(ev.Phase) + "…"
+		m.liveStatus[sk] = string(ev.Phase)
 
 	case progress.EvalDone:
 		if sc := m.liveScenario(ev.Iter, ev.ScenarioID); sc != nil {
@@ -740,7 +843,7 @@ func (m *model) expandAncestors(key string) {
 }
 
 func (m *model) ensureCursorVisible() {
-	h := m.paneInnerHeight()
+	h := m.treeInnerHeight()
 	if h <= 0 {
 		return
 	}
@@ -783,8 +886,10 @@ func (m *model) detailInnerWidth() int {
 	return w
 }
 
+// paneInnerHeight is the activity (detail) pane's content height — it shares the
+// right column with the logs panel, so the log strip's rows are subtracted.
 func (m *model) paneInnerHeight() int {
-	// header(1) + body border(2) + log strip(title 1 + logStripHeight + border 2) + footer(1)
+	// header(2) + activity border(2) + logs(logStripHeight + border 2) + footer(1)
 	h := m.height - 7 - logStripHeight
 	if h < 3 {
 		h = 3
@@ -792,10 +897,21 @@ func (m *model) paneInnerHeight() int {
 	return h
 }
 
-func (m *model) logInnerWidth() int {
-	w := m.width - 2
-	if w < 10 {
-		w = 10
+// treeInnerHeight is the runs rail's content height — it spans the full body, so
+// only the header(2), its own border(2), and footer(1) are subtracted.
+func (m *model) treeInnerHeight() int {
+	h := m.height - 5
+	if h < 3 {
+		h = 3
+	}
+	return h
+}
+
+// wrapWidth is the column width for word-wrapped prose in the detail pane.
+func (m *model) wrapWidth() int {
+	w := m.detailInnerWidth() - 1
+	if w < 20 {
+		w = 20
 	}
 	return w
 }
@@ -887,7 +1003,7 @@ func (m *model) refreshLog() {
 	}
 	content, shown := m.filteredLogContent()
 	if shown == 0 {
-		m.logVP.SetContent(mutedStyle.Render("(no output)"))
+		m.logVP.SetContent(mutedStyle.Render("no output for this selection"))
 		return
 	}
 	m.logVP.SetContent(content)
@@ -897,11 +1013,37 @@ func (m *model) refreshLog() {
 // filteredLogContent renders the log lines visible for the selected node's scope
 // (the same filter the strip uses), returning the joined text and the count shown.
 // Shared by the inline strip (refreshLog) and the fullscreen log modal.
+// logEntriesForRun returns the log entries to filter for the given run: the live
+// in-memory buffer for the active run (or when no run is scoped), otherwise the
+// selected past run's persisted logs converted to logEntry.
+func (m *model) logEntriesForRun(runTs string) []logEntry {
+	if runTs == "" || (m.live != nil && runTs == m.live.Timestamp) {
+		return m.logs
+	}
+	for i := range m.pastRuns {
+		if m.pastRuns[i].Timestamp == runTs {
+			src := m.pastRuns[i].Logs
+			out := make([]logEntry, 0, len(src))
+			for _, le := range src {
+				out = append(out, logEntry{
+					runTs:      runTs,
+					iter:       le.Iter,
+					scenarioID: le.ScenarioID,
+					evalID:     le.EvalID,
+					text:       le.Text,
+				})
+			}
+			return out
+		}
+	}
+	return m.logs
+}
+
 func (m *model) filteredLogContent() (string, int) {
 	nodeRunTs, nodeIter, nodeScen, nodeEval := parseSelKey(m.selectedKey)
 	var b strings.Builder
 	shown := 0
-	for _, e := range m.logs {
+	for _, e := range m.logEntriesForRun(nodeRunTs) {
 		if nodeIter >= 0 && e.iter != nodeIter {
 			continue
 		}
@@ -964,7 +1106,7 @@ func (m *model) View() string {
 		return "Error: " + m.err.Error() + "\n"
 	}
 	if m.mode == modePicker {
-		return m.picker.View()
+		return m.pickerView()
 	}
 	view := m.browseView()
 	if m.confirmStart || m.confirmResume || m.confirmStop || m.confirmQuit {
@@ -1045,64 +1187,207 @@ func overlayCenter(base, box string, w, h int) string {
 }
 
 func (m *model) browseView() string {
-	h := m.paneInnerHeight()
+	// Runs rail spans the full body height; activity + logs share the right column.
+	treeH := m.treeInnerHeight()
+	detailH := m.paneInnerHeight()
 
-	// Tree pane.
 	var tb strings.Builder
-	end := m.treeOffset + h
+	end := m.treeOffset + treeH
 	if end > len(m.rows) {
 		end = len(m.rows)
 	}
 	for i := m.treeOffset; i < end; i++ {
-		tb.WriteString(renderRow(m.rows[i], i == m.cursor && m.focus == paneTree, m.treeWidth))
+		tb.WriteString(renderRow(m.rows[i], i == m.cursor && m.focus == paneTree, m.treeWidth, m.spinner()))
 		tb.WriteByte('\n')
 	}
-	treePane := lipgloss.NewStyle().Width(m.treeWidth).Height(h).Render(tb.String())
-	detailPane := lipgloss.NewStyle().Width(m.detailInnerWidth()).Height(h).Render(m.detailVP.View())
+	treePane := lipgloss.NewStyle().Width(m.treeWidth).Height(treeH).Render(tb.String())
+	runsPanel := titledPanel("runs", "", treePane, m.treeWidth, m.focus == paneTree)
 
-	treeBox := paneInactiveBorder
-	detailBox := paneInactiveBorder
-	if m.focus == paneTree {
-		treeBox = paneActiveBorder
+	// Right column: activity over logs (logs scoped to the selected node).
+	detailPane := lipgloss.NewStyle().Width(m.detailInnerWidth()).Height(detailH).Render(m.detailVP.View())
+	activityPanel := titledPanel("activity", "", detailPane, m.detailInnerWidth(), m.focus == paneDetail)
+
+	logContent := lipgloss.NewStyle().Width(m.detailInnerWidth()).Height(m.logInnerHeight()).Render(m.logVP.View())
+	logsPanel := titledPanel("logs", m.logScope(), logContent, m.detailInnerWidth(), m.focus == paneLog)
+
+	right := lipgloss.JoinVertical(lipgloss.Left, activityPanel, logsPanel)
+	body := lipgloss.JoinHorizontal(lipgloss.Top, runsPanel, right)
+
+	return m.headerRibbon() + "\n" + body + "\n" + m.footer()
+}
+
+// logScope is a short label for the logs panel border showing what the logs are
+// filtered to — the selected node's narrowest scope.
+func (m *model) logScope() string {
+	runTs, iter, scen, eval := parseSelKey(m.selectedKey)
+	scope := ""
+	switch {
+	case eval != "":
+		scope = eval
+	case scen != "":
+		scope = scen
+	case iter >= 0:
+		scope = fmt.Sprintf("iter %d", iter)
+	case runTs != "":
+		scope = "run " + shortRunTag(runTs)
+	}
+	if len(scope) > 18 {
+		scope = scope[:17] + "…"
+	}
+	return scope
+}
+
+// spinner returns the current braille spinner frame.
+func (m *model) spinner() string {
+	return spinnerFrames[m.spinnerIdx%len(spinnerFrames)]
+}
+
+// currentRun is the run the header readout describes: the live run if any,
+// otherwise the run owning the selected tree node.
+func (m *model) currentRun() *runs.Run {
+	if m.live != nil {
+		return m.live
+	}
+	runTs, _, _, _ := parseSelKey(m.selectedKey)
+	for i := range m.pastRuns {
+		if m.pastRuns[i].Timestamp == runTs {
+			return &m.pastRuns[i]
+		}
+	}
+	return nil
+}
+
+// iterScores returns each iteration's score and whether it survived selection,
+// for the trajectory sparkline.
+func iterScores(r *runs.Run) (scores []float64, kept []bool) {
+	best := -1.0
+	for i := range r.Iterations {
+		s := r.Iterations[i].Score
+		scores = append(scores, s)
+		survived := i == 0 || (s >= 0 && s > best) // baseline is the starting point
+		kept = append(kept, survived)
+		if s >= 0 && s > best {
+			best = s
+		}
+	}
+	return scores, kept
+}
+
+// headerRibbon renders the two-line instrument readout: identity + BEST/Δ on
+// line one, the score trajectory sparkline + live progress on line two.
+func (m *model) headerRibbon() string {
+	run := m.currentRun()
+
+	title := lipgloss.NewStyle().Foreground(colorAccent).Render("▌") +
+		valueStyle.Render(" papi") + mutedStyle.Render(" · "+m.skillName)
+
+	right := ""
+	if run != nil && run.BestScore() >= 0 {
+		best := run.BestScore()
+		right = mutedStyle.Render("BEST ") + scoreStyle(best).Bold(true).Render(fmt.Sprintf("%.1f%%", best*100))
+		if len(run.Iterations) > 0 {
+			if base := run.Iterations[0].Score; base >= 0 {
+				d := (best - base) * 100
+				arrow := "▲"
+				if d < -0.05 {
+					arrow = "▼"
+				} else if d <= 0.05 {
+					arrow = "·"
+				}
+				right += "  " + scoreStyle(best).Render(fmt.Sprintf("%s %+.1f vs baseline", arrow, d))
+			}
+		}
+	}
+	// Pulsing TAILING badge while we're following a live run.
+	if m.follow && m.liveActive {
+		chip := tailChipOff
+		if (m.spinnerIdx/5)%2 == 0 {
+			chip = tailChipOn
+		}
+		if right != "" {
+			right += "   "
+		}
+		right += chip.Render(" ● TAILING ")
+	}
+	gap := m.width - lipgloss.Width(title) - lipgloss.Width(right)
+	if gap < 1 {
+		gap = 1
+	}
+	line1 := title + strings.Repeat(" ", gap) + right
+
+	// Line 2: baseline anchor + sparkline + live/idle status.
+	var line2 strings.Builder
+	line2.WriteByte(' ')
+	if run != nil && len(run.Iterations) > 0 {
+		if base := run.Iterations[0].Score; base >= 0 {
+			line2.WriteString(mutedStyle.Render(fmt.Sprintf("%.1f ", base*100)))
+		}
+		scores, kept := iterScores(run)
+		line2.WriteString(sparkline(scores, kept))
+		line2.WriteString("  ")
+	}
+	if status := m.liveProgress(); status != "" {
+		line2.WriteString(status)
+	} else if !m.liveActive && run != nil {
+		line2.WriteString(mutedStyle.Render(fmt.Sprintf("%d iterations", len(run.Iterations))))
+	}
+
+	return line1 + "\n" + line2.String()
+}
+
+// liveProgress summarizes the running iteration: which iteration, the active
+// phase with a spinner, and scenario progress within the iteration.
+func (m *model) liveProgress() string {
+	if !m.liveActive || m.live == nil || len(m.live.Iterations) == 0 {
+		return ""
+	}
+	it := &m.live.Iterations[len(m.live.Iterations)-1]
+	done, running := 0, 0
+	phase := ""
+	for i := range it.Scenarios {
+		sc := &it.Scenarios[i]
+		if sc.Score >= 0 {
+			done++
+		}
+		if st := m.liveStatus[scenKey(iterKey(runKey(m.live.Timestamp), it.Index), sc.ID)]; st != "" {
+			phase = st
+			running = 1
+		}
+	}
+	parts := []string{mutedStyle.Render(fmt.Sprintf("iter %d/%d", it.Index, m.totalIters))}
+	if phase != "" {
+		parts = append(parts, liveBadgeStyle.Render(m.spinner()+" "+phase))
 	} else {
-		detailBox = paneActiveBorder
+		parts = append(parts, liveBadgeStyle.Render(m.spinner()+" running"))
 	}
-
-	body := lipgloss.JoinHorizontal(lipgloss.Top, treeBox.Render(treePane), detailBox.Render(detailPane))
-
-	// Bottom log strip.
-	logBox := paneInactiveBorder
-	if m.focus == paneLog {
-		logBox = paneActiveBorder
+	if total := len(m.scenarioIDs); total > 0 {
+		cur := done + running
+		if cur > total {
+			cur = total
+		}
+		parts = append(parts, mutedStyle.Render(fmt.Sprintf("scenario %d/%d", cur, total)))
 	}
-	logTitle := lipgloss.NewStyle().Width(m.logInnerWidth()).Render(mutedStyle.Render("log"))
-	logContent := lipgloss.NewStyle().Width(m.logInnerWidth()).Height(m.logInnerHeight()).Render(m.logVP.View())
-	logStrip := logBox.Render(logTitle + "\n" + logContent)
-
-	header := titleStyle.Render("papi · " + m.skillName)
-	if m.liveActive {
-		header += "  " + liveBadgeStyle.Render("● running")
-	}
-
-	return header + "\n" + body + "\n" + logStrip + "\n" + m.footer()
+	return strings.Join(parts, mutedStyle.Render(" · "))
 }
 
 func (m *model) footer() string {
-	keys := "↑/↓ move · space fold · enter open · tab pane · g live · q back"
+	// Focus now lives on the panel titles, so the footer is just keys.
+	nav := "↑/↓ move · space fold · enter open · tab pane · g tail"
 	if m.focus == paneLog {
-		keys += " · enter expand"
+		nav += " · enter expand"
 	}
+	actions := "q back"
 	if m.liveActive {
-		keys += " · s stop"
+		actions = "s stop · " + actions
 	} else if m.skillRunnable {
-		keys += " · r run"
 		if _, ok := m.selectedResumableRun(); ok {
-			keys += " · c continue"
+			actions = "c continue · " + actions
 		}
+		actions = "r run · " + actions
 	}
-	line := footerStyle.Render(keys)
+	line := footerStyle.Render(nav) + footerStyle.Render("   "+actions)
 	if m.statusMsg != "" {
-		line = footerStyle.Render(m.statusMsg) + "  " + line
+		line = liveBadgeStyle.Render(m.statusMsg) + "  " + line
 	}
 	return line
 }

@@ -19,10 +19,11 @@ import (
 
 // Skill describes a skill discovered under skills/ and the state of its runs.
 type Skill struct {
-	Name      string
-	Runnable  bool    // has a .papi/skills/<name>/scenarios directory
-	LastRun   string  // timestamp of most recent run, "" if none
-	BestScore float64 // best iteration score of the most recent run, -1 if none
+	Name       string
+	Runnable   bool      // has a .papi/skills/<name>/scenarios directory
+	LastRun    string    // timestamp of most recent run, "" if none
+	BestScore  float64   // best iteration score of the most recent run, -1 if none
+	Trajectory []float64 // per-iteration scores of the most recent run, for a mini sparkline
 }
 
 // Run is a single timestamped run directory containing iterations.
@@ -31,6 +32,15 @@ type Run struct {
 	Dir        string
 	Iterations []Iteration
 	State      *types.RunState // run-level checkpoint (state.json), nil if absent
+	Logs       []LogEntry      // persisted log lines (logs.jsonl), empty for older runs
+}
+
+// LogEntry is one persisted log line scoped to a node in the run hierarchy.
+type LogEntry struct {
+	Iter       int    // iteration index; -1 = run-level
+	ScenarioID string // "" = not scenario-specific
+	EvalID     string // "" = not eval-specific
+	Text       string
 }
 
 // Resumable reports whether this run can be continued: it has a checkpoint, has
@@ -149,6 +159,9 @@ func ListSkills(repoRoot string) ([]Skill, error) {
 			last := rs[len(rs)-1]
 			s.LastRun = last.Timestamp
 			s.BestScore = last.BestScore()
+			for i := range last.Iterations {
+				s.Trajectory = append(s.Trajectory, last.Iterations[i].Score)
+			}
 		}
 		skills = append(skills, s)
 	}
@@ -202,6 +215,7 @@ func LoadRun(dir string) (Run, error) {
 			run.State = &st
 		}
 	}
+	run.Logs = loadLogs(filepath.Join(dir, "logs.jsonl"))
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return run, err
@@ -219,6 +233,35 @@ func LoadRun(dir string) (Run, error) {
 	}
 	sort.Slice(run.Iterations, func(i, j int) bool { return run.Iterations[i].Index < run.Iterations[j].Index })
 	return run, nil
+}
+
+// loadLogs reads a run's persisted logs.jsonl (one JSON record per line),
+// splitting each record's text into one LogEntry per line to match how live logs
+// are stored. A missing file yields no entries.
+func loadLogs(path string) []LogEntry {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var out []LogEntry
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var p struct {
+			Iter       int    `json:"iter"`
+			ScenarioID string `json:"scenarioId"`
+			EvalID     string `json:"evalId"`
+			Text       string `json:"text"`
+		}
+		if json.Unmarshal([]byte(line), &p) != nil {
+			continue
+		}
+		for _, t := range strings.Split(p.Text, "\n") {
+			out = append(out, LogEntry{Iter: p.Iter, ScenarioID: p.ScenarioID, EvalID: p.EvalID, Text: t})
+		}
+	}
+	return out
 }
 
 // LoadIteration reads one iteration directory.
