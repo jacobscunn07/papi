@@ -108,15 +108,19 @@ type Eval interface {
 	Evaluate(ctx EvalContext) (EvalResult, error)
 }
 
-// ScenarioRunResult holds the full output of running one scenario.
+// ScenarioRunResult holds the full output of running one scenario. The two
+// transcript fields carry the invocation- and quality-phase transcripts so the
+// result is self-contained for persistence (the prompt is Scenario.Prompt).
 type ScenarioRunResult struct {
-	Scenario         Scenario          `json:"scenario"`
-	InvocationOutput *ClaudeJsonOutput `json:"invocationOutput"`
-	QualityOutput    *ClaudeJsonOutput `json:"qualityOutput"`
-	Invoked          bool              `json:"invoked"`
-	EvalResults      []EvalResult      `json:"evalResults"`
-	ScenarioScore    float64           `json:"scenarioScore"`
-	DurationMs       int64             `json:"durationMs"`
+	Scenario             Scenario          `json:"scenario"`
+	InvocationOutput     *ClaudeJsonOutput `json:"invocationOutput"`
+	QualityOutput        *ClaudeJsonOutput `json:"qualityOutput"`
+	Invoked              bool              `json:"invoked"`
+	EvalResults          []EvalResult      `json:"evalResults"`
+	ScenarioScore        float64           `json:"scenarioScore"`
+	DurationMs           int64             `json:"durationMs"`
+	InvocationTranscript string            `json:"invocationTranscript,omitempty"`
+	QualityTranscript    string            `json:"qualityTranscript,omitempty"`
 }
 
 // RunState is the run-level checkpoint persisted as state.json at the run root.

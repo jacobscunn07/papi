@@ -1,26 +1,27 @@
 package progress
 
 import (
-	"bufio"
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"testing"
+
+	"papi/internal/store"
 )
 
 type captureReporter struct{ events []Event }
 
 func (c *captureReporter) Emit(e Event) { c.events = append(c.events, e) }
 
-// TestLogTeeScoping verifies that a LogTee wrapped by WithScope writes each
-// LogLine to disk with its final iteration/scenario/eval scope, and still forwards
-// every event to the inner reporter unchanged.
+// TestLogTeeScoping verifies that a LogTee wrapped by WithScope persists each
+// LogLine to the store with its final iteration/scenario/eval scope, and still
+// forwards every event to the inner reporter unchanged.
 func TestLogTeeScoping(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "logs.jsonl")
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
 
 	capt := &captureReporter{}
-	tee := NewLogTee(capt, path)
+	tee := NewLogTee(capt, st, "demo", "1000")
 
 	// Mirror the loop's wrapping: tee wraps the raw reporter, WithScope on top.
 	runRep := WithScope(tee, -1, "", "")
@@ -42,26 +43,16 @@ func TestLogTeeScoping(t *testing.T) {
 		t.Fatalf("inner scen line not scoped: %+v", capt.events[2])
 	}
 
-	// On disk: exactly the 4 log lines, each with the right scope.
-	want := []persistedLog{
+	// In the store: exactly the 4 log lines, each with the right scope.
+	want := []store.LogRow{
 		{Iter: -1, Text: "run line"},
 		{Iter: 1, Text: "iter line"},
 		{Iter: 1, ScenarioID: "scenA", Text: "scen line"},
 		{Iter: 1, ScenarioID: "scenA", EvalID: "eval1", Text: "eval line"},
 	}
-	f, err := os.Open(path)
+	got, err := st.Logs("demo", "1000")
 	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer f.Close()
-	var got []persistedLog
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		var p persistedLog
-		if err := json.Unmarshal(sc.Bytes(), &p); err != nil {
-			t.Fatalf("bad json line %q: %v", sc.Text(), err)
-		}
-		got = append(got, p)
+		t.Fatalf("logs: %v", err)
 	}
 	if len(got) != len(want) {
 		t.Fatalf("wrote %d records, want %d: %+v", len(got), len(want), got)

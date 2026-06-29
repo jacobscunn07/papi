@@ -8,3 +8,6 @@ research/runs/
 research/skills/**/runs
 .papi/skills/**/runs
 .papi/skills/**/lock
+.papi/papi.db
+.papi/papi.db-wal
+.papi/papi.db-shm

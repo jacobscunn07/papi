@@ -9,6 +9,7 @@ import (
 	"papi/internal/appconfig"
 	"papi/internal/loop"
 	"papi/internal/progress"
+	"papi/internal/store"
 	"papi/internal/tui"
 
 	"github.com/spf13/cobra"
@@ -43,8 +44,14 @@ var runCmd = &cobra.Command{
 			return err
 		}
 
+		st, err := store.Open(repoRoot)
+		if err != nil {
+			return err
+		}
+		defer st.Close()
+
 		rep := progress.NewCLIReporter(cfg.MaxIterations, cfg.LLMJudgeWeight, cfg.NonLLMJudgeWeight)
-		return loop.Run(context.Background(), cfg, repoRoot, rep, false)
+		return loop.Run(context.Background(), cfg, repoRoot, st, rep, false)
 	},
 }
 

@@ -16,6 +16,7 @@ import (
 	"papi/internal/loop"
 	"papi/internal/progress"
 	"papi/internal/runs"
+	"papi/internal/store"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -25,7 +26,12 @@ import (
 
 // Run starts the TUI against the given repo root.
 func Run(repoRoot string) error {
-	m, err := newModel(repoRoot)
+	st, err := store.Open(repoRoot)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	m, err := newModel(repoRoot, st)
 	if err != nil {
 		return err
 	}
@@ -53,6 +59,7 @@ const logStripHeight = 4
 
 type model struct {
 	repoRoot string
+	store    *store.Store
 
 	mode   mode
 	picker list.Model
@@ -187,8 +194,8 @@ func (m *model) pickerView() string {
 	return title + "\n" + tagline + "\n" + panel + "\n" + help
 }
 
-func newModel(repoRoot string) (*model, error) {
-	skills, err := runs.ListSkills(repoRoot)
+func newModel(repoRoot string, st *store.Store) (*model, error) {
+	skills, err := runs.ListSkills(st)
 	if err != nil {
 		return nil, err
 	}
@@ -210,6 +217,7 @@ func newModel(repoRoot string) (*model, error) {
 
 	return &model{
 		repoRoot:   repoRoot,
+		store:      st,
 		mode:       modePicker,
 		picker:     l,
 		liveStatus: map[string]string{},
@@ -530,10 +538,11 @@ func (m *model) startRun(skill string) tea.Cmd {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 	repoRoot := m.repoRoot
+	st := m.store
 	events := m.events
 	done := m.done
 	go func() {
-		err := loop.Run(ctx, cfg, repoRoot, progress.NewChannelReporter(events), true)
+		err := loop.Run(ctx, cfg, repoRoot, st, progress.NewChannelReporter(events), true)
 		done <- err
 		close(events)
 	}()
@@ -573,10 +582,11 @@ func (m *model) startResume(skill, timestamp string) tea.Cmd {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 	repoRoot := m.repoRoot
+	st := m.store
 	events := m.events
 	done := m.done
 	go func() {
-		err := loop.Run(ctx, cfg, repoRoot, progress.NewChannelReporter(events), true)
+		err := loop.Run(ctx, cfg, repoRoot, st, progress.NewChannelReporter(events), true)
 		done <- err
 		close(events)
 	}()
@@ -597,7 +607,7 @@ func (m *model) openBrowse(skill string, runnable bool) {
 	m.liveStatus = map[string]string{}
 	m.streams = map[string]*strings.Builder{}
 	m.expanded = map[string]bool{}
-	rs, _ := runs.ListRuns(m.repoRoot, skill)
+	rs, _ := runs.ListRuns(m.store, skill)
 	m.pastRuns = rs
 	// Expand the most recent past run by default.
 	if len(rs) > 0 {
@@ -626,7 +636,7 @@ func (m *model) selectedResumableRun() (*runs.Run, bool) {
 }
 
 func (m *model) reloadSkills() {
-	skills, _ := runs.ListSkills(m.repoRoot)
+	skills, _ := runs.ListSkills(m.store)
 	items := make([]list.Item, len(skills))
 	for i, s := range skills {
 		items[i] = skillItem{s}
@@ -643,8 +653,7 @@ func (m *model) applyEvent(e progress.Event) {
 		if ev.ResumeFrom > 0 {
 			// Resuming: load the already-completed iterations from disk so the run's
 			// history stays visible while the remaining iterations stream in.
-			runDir := filepath.Join(m.repoRoot, ".papi", "skills", m.skillName, "runs", ev.Timestamp)
-			if r, err := runs.LoadRun(runDir); err == nil {
+			if r, err := runs.LoadRun(m.store, m.skillName, ev.Timestamp); err == nil {
 				m.live = &r
 			} else {
 				m.live = &runs.Run{Timestamp: ev.Timestamp}
@@ -705,7 +714,7 @@ func (m *model) applyEvent(e progress.Event) {
 			sc.Score = ev.Result.ScenarioScore
 			sc.Invoked = ev.Result.Invoked
 			sc.Result = ev.Result
-			sc.Transcripts, sc.Files = runs.ScenarioArtifacts(filepath.Join(m.iterDir(ev.Iter), ev.Result.Scenario.ID))
+			sc.Transcripts, sc.Files = runs.BuildScenarioArtifacts(filepath.Join(m.iterDir(ev.Iter), ev.Result.Scenario.ID), ev.Result)
 		}
 		sk := scenKey(iterKey(runKey(m.live.Timestamp), ev.Iter), ev.Result.Scenario.ID)
 		delete(m.liveStatus, sk)

@@ -1,0 +1,7 @@
+id: write-go-utility
+prompt: |
+  Create a small command-line program in Go that takes a file path as its
+  first argument and prints the number of lines in that file. Write the code
+  to a file named main.go in the current directory, and make sure it compiles
+  and is gofmt-clean.
+tags: [cli, files]

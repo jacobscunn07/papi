@@ -1,29 +1,28 @@
 package loop
 
 import (
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"testing"
 
+	"papi/internal/store"
 	"papi/internal/types"
 )
 
-// writeRunState lays down a run directory with a state.json checkpoint under the
-// repo's .papi/skills/<skill>/runs/<ts>/ tree, the way the loop persists them.
-func writeRunState(t *testing.T, repoRoot, skill, ts string, st types.RunState) {
+// seedRun writes a run-level checkpoint to the store the way the loop persists them.
+func seedRun(t *testing.T, st *store.Store, state types.RunState) {
 	t.Helper()
-	dir := filepath.Join(repoRoot, ".papi", "skills", skill, "runs", ts)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := st.UpsertRun(state); err != nil {
 		t.Fatal(err)
 	}
-	b, err := json.Marshal(st)
+}
+
+func openStore(t *testing.T) *store.Store {
+	t.Helper()
+	st, err := store.Open(t.TempDir())
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("open store: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "state.json"), b, 0644); err != nil {
-		t.Fatal(err)
-	}
+	t.Cleanup(func() { st.Close() })
+	return st
 }
 
 func TestFindResumableRun(t *testing.T) {
@@ -31,74 +30,74 @@ func TestFindResumableRun(t *testing.T) {
 	cfg := &types.ResearchConfig{SkillName: skill, MaxIterations: 10, MaxBudgetUSD: 5.0}
 
 	t.Run("picks newest eligible run", func(t *testing.T) {
-		root := t.TempDir()
+		st := openStore(t)
 		// Older run, eligible.
-		writeRunState(t, root, skill, "1000", types.RunState{Timestamp: "1000", LastCompletedIteration: 2, TotalCost: 1.0, MaxIterations: 10, Budget: 5.0})
+		seedRun(t, st, types.RunState{Skill: skill, Timestamp: "1000", LastCompletedIteration: 2, TotalCost: 1.0, MaxIterations: 10, Budget: 5.0})
 		// Newer run, also eligible — should win.
-		writeRunState(t, root, skill, "2000", types.RunState{Timestamp: "2000", LastCompletedIteration: 5, TotalCost: 2.0, MaxIterations: 10, Budget: 5.0})
+		seedRun(t, st, types.RunState{Skill: skill, Timestamp: "2000", LastCompletedIteration: 5, TotalCost: 2.0, MaxIterations: 10, Budget: 5.0})
 
-		st, err := findResumableRun(root, cfg)
+		got, err := findResumableRun(st, cfg)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if st.Timestamp != "2000" {
-			t.Fatalf("got run %s, want newest eligible 2000", st.Timestamp)
+		if got.Timestamp != "2000" {
+			t.Fatalf("got run %s, want newest eligible 2000", got.Timestamp)
 		}
 	})
 
 	t.Run("skips runs that exhausted iterations or budget", func(t *testing.T) {
-		root := t.TempDir()
+		st := openStore(t)
 		// Newest run reached max iterations → not eligible.
-		writeRunState(t, root, skill, "3000", types.RunState{Timestamp: "3000", LastCompletedIteration: 10, TotalCost: 1.0, MaxIterations: 10, Budget: 5.0})
+		seedRun(t, st, types.RunState{Skill: skill, Timestamp: "3000", LastCompletedIteration: 10, TotalCost: 1.0, MaxIterations: 10, Budget: 5.0})
 		// Next run is over budget → not eligible.
-		writeRunState(t, root, skill, "2000", types.RunState{Timestamp: "2000", LastCompletedIteration: 4, TotalCost: 5.0, MaxIterations: 10, Budget: 5.0})
+		seedRun(t, st, types.RunState{Skill: skill, Timestamp: "2000", LastCompletedIteration: 4, TotalCost: 5.0, MaxIterations: 10, Budget: 5.0})
 		// Oldest run is eligible → should be selected.
-		writeRunState(t, root, skill, "1000", types.RunState{Timestamp: "1000", LastCompletedIteration: 3, TotalCost: 1.0, MaxIterations: 10, Budget: 5.0})
+		seedRun(t, st, types.RunState{Skill: skill, Timestamp: "1000", LastCompletedIteration: 3, TotalCost: 1.0, MaxIterations: 10, Budget: 5.0})
 
-		st, err := findResumableRun(root, cfg)
+		got, err := findResumableRun(st, cfg)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if st.Timestamp != "1000" {
-			t.Fatalf("got run %s, want only-eligible 1000", st.Timestamp)
+		if got.Timestamp != "1000" {
+			t.Fatalf("got run %s, want only-eligible 1000", got.Timestamp)
 		}
 	})
 
 	t.Run("honors an explicit resume timestamp", func(t *testing.T) {
-		root := t.TempDir()
-		writeRunState(t, root, skill, "1000", types.RunState{Timestamp: "1000", LastCompletedIteration: 2, TotalCost: 1.0, MaxIterations: 10, Budget: 5.0})
-		writeRunState(t, root, skill, "2000", types.RunState{Timestamp: "2000", LastCompletedIteration: 5, TotalCost: 2.0, MaxIterations: 10, Budget: 5.0})
+		st := openStore(t)
+		seedRun(t, st, types.RunState{Skill: skill, Timestamp: "1000", LastCompletedIteration: 2, TotalCost: 1.0, MaxIterations: 10, Budget: 5.0})
+		seedRun(t, st, types.RunState{Skill: skill, Timestamp: "2000", LastCompletedIteration: 5, TotalCost: 2.0, MaxIterations: 10, Budget: 5.0})
 
 		pinned := &types.ResearchConfig{SkillName: skill, MaxIterations: 10, MaxBudgetUSD: 5.0, ResumeTimestamp: "1000"}
-		st, err := findResumableRun(root, pinned)
+		got, err := findResumableRun(st, pinned)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if st.Timestamp != "1000" {
-			t.Fatalf("got run %s, want pinned 1000", st.Timestamp)
+		if got.Timestamp != "1000" {
+			t.Fatalf("got run %s, want pinned 1000", got.Timestamp)
 		}
 	})
 
 	t.Run("errors when nothing is resumable", func(t *testing.T) {
-		root := t.TempDir()
-		writeRunState(t, root, skill, "1000", types.RunState{Timestamp: "1000", LastCompletedIteration: 10, TotalCost: 1.0, MaxIterations: 10, Budget: 5.0})
+		st := openStore(t)
+		seedRun(t, st, types.RunState{Skill: skill, Timestamp: "1000", LastCompletedIteration: 10, TotalCost: 1.0, MaxIterations: 10, Budget: 5.0})
 
-		if _, err := findResumableRun(root, cfg); err == nil {
+		if _, err := findResumableRun(st, cfg); err == nil {
 			t.Fatal("expected an error when no run is resumable, got nil")
 		}
 	})
 
 	t.Run("raising the iteration cap makes a completed run resumable again", func(t *testing.T) {
-		root := t.TempDir()
-		writeRunState(t, root, skill, "1000", types.RunState{Timestamp: "1000", LastCompletedIteration: 10, TotalCost: 1.0, MaxIterations: 10, Budget: 5.0})
+		st := openStore(t)
+		seedRun(t, st, types.RunState{Skill: skill, Timestamp: "1000", LastCompletedIteration: 10, TotalCost: 1.0, MaxIterations: 10, Budget: 5.0})
 
 		extended := &types.ResearchConfig{SkillName: skill, MaxIterations: 20, MaxBudgetUSD: 5.0}
-		st, err := findResumableRun(root, extended)
+		got, err := findResumableRun(st, extended)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if st.Timestamp != "1000" {
-			t.Fatalf("got run %s, want 1000 now-eligible under a higher iteration cap", st.Timestamp)
+		if got.Timestamp != "1000" {
+			t.Fatalf("got run %s, want 1000 now-eligible under a higher iteration cap", got.Timestamp)
 		}
 	})
 }

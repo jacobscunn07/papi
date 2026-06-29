@@ -1,22 +1,31 @@
 package runs
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
+
+	"papi/internal/store"
 )
 
 func TestLoadLogsRoundTrip(t *testing.T) {
-	dir := t.TempDir()
-	// Records as the LogTee writes them (note the multi-line text record).
-	jsonl := `{"iter":-1,"text":"run line"}
-{"iter":1,"scenarioId":"scenA","text":"line one\nline two"}
-{"iter":1,"scenarioId":"scenA","evalId":"eval1","text":"eval line"}
-`
-	if err := os.WriteFile(filepath.Join(dir, "logs.jsonl"), []byte(jsonl), 0644); err != nil {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := LoadRun(dir)
+	defer st.Close()
+
+	const skill, ts = "demo", "1000"
+	// Records as the LogTee appends them (note the multi-line text record).
+	if err := st.AppendLog(skill, ts, -1, "", "", "run line"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AppendLog(skill, ts, 1, "scenA", "", "line one\nline two"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AppendLog(skill, ts, 1, "scenA", "eval1", "eval line"); err != nil {
+		t.Fatal(err)
+	}
+
+	run, err := LoadRun(st, skill, ts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,8 +40,8 @@ func TestLoadLogsRoundTrip(t *testing.T) {
 		t.Errorf("entry[3] = %+v", run.Logs[3])
 	}
 
-	// Missing file → no logs, no error.
-	empty, err := LoadRun(t.TempDir())
+	// Unknown run → no logs, no error.
+	empty, err := LoadRun(st, skill, "9999")
 	if err != nil || empty.Logs != nil {
 		t.Fatalf("expected empty logs, got %+v err=%v", empty.Logs, err)
 	}

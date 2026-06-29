@@ -19,8 +19,8 @@ import (
 	researchgit "papi/internal/git"
 	"papi/internal/progress"
 	"papi/internal/runner"
-	"papi/internal/runs"
 	"papi/internal/scorer"
+	"papi/internal/store"
 	"papi/internal/types"
 
 	"gopkg.in/yaml.v3"
@@ -89,44 +89,6 @@ func loadScenarios(scenariosDir string, tags []string) ([]types.Scenario, *types
 func iterationDirPath(repoRoot, skillName, runTimestamp string, iteration int) string {
 	return filepath.Join(repoRoot, ".papi", "skills", skillName, "runs", runTimestamp,
 		fmt.Sprintf("iteration-%03d", iteration))
-}
-
-type evalSummary struct {
-	Score       float64            `json:"score"`
-	LLMScore    float64            `json:"llmScore"`
-	NonLLMScore float64            `json:"nonLlmScore"`
-	Evals       []scaledEvalResult `json:"evals"`
-}
-
-func categorizeEvals(results []types.EvalResult) (nonLLM, llm []types.EvalResult) {
-	for _, e := range results {
-		if e.IsLLMJudge {
-			llm = append(llm, e)
-		} else {
-			nonLLM = append(nonLLM, e)
-		}
-	}
-	return
-}
-
-func groupScore(evals []types.EvalResult) float64 {
-	if len(evals) == 0 {
-		return 0
-	}
-	var sum float64
-	for _, e := range evals {
-		sum += e.Score
-	}
-	return sum / float64(len(evals))
-}
-
-type scaledEvalResult struct {
-	EvalID     string  `json:"evalId"`
-	Name       string  `json:"name"`
-	Score      float64 `json:"score"`
-	Reasoning  string  `json:"reasoning"`
-	Required   bool    `json:"required,omitempty"`
-	IsLLMJudge bool    `json:"isLLMJudge,omitempty"`
 }
 
 func runAllScenarios(
@@ -204,51 +166,22 @@ func runAllScenarios(
 		}
 
 		result := types.ScenarioRunResult{
-			Scenario:         scenario,
-			InvocationOutput: evalCtx.InvocationOutput,
-			QualityOutput:    evalCtx.QualityOutput,
-			Invoked:          evalCtx.Invoked,
-			EvalResults:      evalResults,
-			ScenarioScore:    scenarioScore,
-			DurationMs:       durationMs,
+			Scenario:             scenario,
+			InvocationOutput:     evalCtx.InvocationOutput,
+			QualityOutput:        evalCtx.QualityOutput,
+			Invoked:              evalCtx.Invoked,
+			EvalResults:          evalResults,
+			ScenarioScore:        scenarioScore,
+			DurationMs:           durationMs,
+			InvocationTranscript: evalCtx.InvocationTranscript,
+			QualityTranscript:    evalCtx.QualityTranscript,
 		}
 		results = append(results, result)
-
-		_ = os.MkdirAll(scenarioDir, 0755)
-		_ = os.WriteFile(filepath.Join(scenarioDir, "prompt.md"), []byte(scenario.Prompt), 0644)
-		_ = os.WriteFile(filepath.Join(scenarioDir, "invocation.md"), []byte(evalCtx.InvocationTranscript), 0644)
-		if evalCtx.QualityTranscript != "" {
-			_ = os.WriteFile(filepath.Join(scenarioDir, "response.md"), []byte(evalCtx.QualityTranscript), 0644)
-		}
-
-		nonLLMEvals, llmEvals := categorizeEvals(evalResults)
-		nonLLMScore := groupScore(nonLLMEvals)
-		llmScore := groupScore(llmEvals)
-
-		scaled := make([]scaledEvalResult, len(evalResults))
-		for i, r := range evalResults {
-			scaled[i] = scaledEvalResult{r.EvalID, r.Name, parseFloat(pct(r.Score)), r.Reasoning, r.Required, r.IsLLMJudge}
-		}
-		summary := evalSummary{
-			Score:       parseFloat(pct(scenarioScore)),
-			LLMScore:    parseFloat(pct(llmScore)),
-			NonLLMScore: parseFloat(pct(nonLLMScore)),
-			Evals:       scaled,
-		}
-		if b, err := json.MarshalIndent(summary, "", "  "); err == nil {
-			_ = os.WriteFile(filepath.Join(scenarioDir, "evals.json"), b, 0644)
-		}
 
 		rep.Emit(progress.ScenarioDone{Iter: iter, Result: result})
 	}
 
 	return results, totalCost, nil
-}
-
-func parseFloat(s string) float64 {
-	var f float64
-	fmt.Sscanf(s, "%f", &f)
-	return f
 }
 
 func buildResearchPrompt(currentSkillMd string, prevResults []types.ScenarioRunResult, prevScore float64, iteration int) string {
@@ -279,60 +212,6 @@ func stripPreamble(s string) string {
 	return frontmatterPrefixRe.ReplaceAllString(s, "$1")
 }
 
-type iterationSummary struct {
-	Score      float64                   `json:"score"`
-	DurationMs int64                     `json:"durationMs"`
-	Scenarios  []types.ScenarioRunResult `json:"scenarios"`
-}
-
-func saveIterationResults(iterationDir string, results []types.ScenarioRunResult, score float64, durationMs int64) error {
-	b, err := json.MarshalIndent(iterationSummary{Score: parseFloat(pct(score)), DurationMs: durationMs, Scenarios: results}, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(iterationDir, "results.json"), b, 0644)
-}
-
-// loadIterationResults reads back the scenario results persisted in an iteration's
-// results.json, used to rebuild prevResults for the research prompt on resume.
-func loadIterationResults(iterationDir string) ([]types.ScenarioRunResult, error) {
-	b, err := os.ReadFile(filepath.Join(iterationDir, "results.json"))
-	if err != nil {
-		return nil, err
-	}
-	var s iterationSummary
-	if err := json.Unmarshal(b, &s); err != nil {
-		return nil, err
-	}
-	return s.Scenarios, nil
-}
-
-// runDirPath is the root directory for a run (parent of its iteration-NNN dirs).
-func runDirPath(repoRoot, skillName, runTimestamp string) string {
-	return filepath.Join(repoRoot, ".papi", "skills", skillName, "runs", runTimestamp)
-}
-
-// saveRunState persists the run-level checkpoint as state.json at the run root.
-func saveRunState(runDir string, st types.RunState) error {
-	st.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	b, err := json.MarshalIndent(st, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(runDir, "state.json"), b, 0644)
-}
-
-// loadRunState reads the state.json checkpoint from a run directory.
-func loadRunState(runDir string) (types.RunState, error) {
-	var st types.RunState
-	b, err := os.ReadFile(filepath.Join(runDir, "state.json"))
-	if err != nil {
-		return st, err
-	}
-	err = json.Unmarshal(b, &st)
-	return st, err
-}
-
 // resumable reports whether a run can still be continued under cfg: it has not
 // reached its natural end yet (more iterations and budget remain).
 func resumable(st types.RunState, cfg *types.ResearchConfig) bool {
@@ -341,23 +220,18 @@ func resumable(st types.RunState, cfg *types.ResearchConfig) bool {
 
 // findResumableRun returns the newest run for the skill that can be resumed under
 // cfg. When cfg.ResumeTimestamp is set, only that run is considered.
-func findResumableRun(repoRoot string, cfg *types.ResearchConfig) (types.RunState, error) {
-	rs, err := runs.ListRuns(repoRoot, cfg.SkillName)
+func findResumableRun(st *store.Store, cfg *types.ResearchConfig) (types.RunState, error) {
+	rs, err := st.RunStates(cfg.SkillName)
 	if err != nil {
 		return types.RunState{}, err
 	}
-	// ListRuns returns oldest-first; scan newest-first for the first eligible run.
+	// RunStates returns oldest-first; scan newest-first for the first eligible run.
 	for i := len(rs) - 1; i >= 0; i-- {
-		ts := rs[i].Timestamp
-		if cfg.ResumeTimestamp != "" && ts != cfg.ResumeTimestamp {
+		if cfg.ResumeTimestamp != "" && rs[i].Timestamp != cfg.ResumeTimestamp {
 			continue
 		}
-		st, err := loadRunState(runDirPath(repoRoot, cfg.SkillName, ts))
-		if err != nil {
-			continue // no/unreadable state.json → not resumable
-		}
-		if resumable(st, cfg) {
-			return st, nil
+		if resumable(rs[i], cfg) {
+			return rs[i], nil
 		}
 	}
 	if cfg.ResumeTimestamp != "" {
@@ -394,32 +268,19 @@ func callResearchAgent(agentPrompt, systemPrompt, model string) (description, sk
 	return "", stripPreamble(out.Result), out.TotalCostUSD, nil
 }
 
-func purgeOldRuns(runsDir string, maxRuns int, rep progress.Reporter) error {
-	if maxRuns <= 0 {
-		return nil
-	}
-	entries, err := os.ReadDir(runsDir)
+// purgeOldRuns drops all but the newest maxRuns runs from the store and removes
+// their on-disk work-dir trees (the generated files that stay on the filesystem).
+func purgeOldRuns(st *store.Store, repoRoot, skill string, maxRuns int, rep progress.Reporter) error {
+	purged, err := st.PurgeOldRuns(skill, maxRuns)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
 		return err
 	}
-	var dirs []os.DirEntry
-	for _, e := range entries {
-		if e.IsDir() {
-			dirs = append(dirs, e)
-		}
-	}
-	if len(dirs) <= maxRuns {
-		return nil
-	}
-	for _, d := range dirs[:len(dirs)-maxRuns] {
-		path := filepath.Join(runsDir, d.Name())
-		if err := os.RemoveAll(path); err != nil {
+	for _, ts := range purged {
+		dir := filepath.Join(repoRoot, ".papi", "skills", skill, "runs", ts)
+		if err := os.RemoveAll(dir); err != nil {
 			return err
 		}
-		rep.Emit(progress.LogLine{Text: "Purged old run: " + d.Name()})
+		rep.Emit(progress.LogLine{Text: "Purged old run: " + ts})
 	}
 	return nil
 }
@@ -456,18 +317,17 @@ func acquireLock(repoRoot, skillName string, rep progress.Reporter) (func(), err
 	return func() { _ = os.Remove(lockPath) }, nil
 }
 
-// snapshotSkillMd copies the SKILL.md currently on disk into the iteration dir so
-// that the exact version that ran (accepted or rejected) is preserved for diffing.
-func snapshotSkillMd(skillDir, iterDir string) {
-	if b, err := os.ReadFile(filepath.Join(skillDir, "SKILL.md")); err == nil {
-		_ = os.WriteFile(filepath.Join(iterDir, "SKILL.md"), b, 0644)
-	}
+// snapshotSkillMd returns the SKILL.md currently on disk so the exact version that
+// ran (accepted or rejected) can be persisted with the iteration for diffing.
+func snapshotSkillMd(skillDir string) string {
+	b, _ := os.ReadFile(filepath.Join(skillDir, "SKILL.md"))
+	return string(b)
 }
 
 // Run executes the full research loop, emitting progress events to rep. When
 // stream is true, Claude output is streamed live via stream-json. Cancelling ctx
 // stops the loop gracefully at the next scenario/iteration boundary.
-func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, rep progress.Reporter, stream bool) error {
+func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, st *store.Store, rep progress.Reporter, stream bool) error {
 	runStart := time.Now()
 
 	// Resolve the run to write into: a fresh timestamp, or the latest resumable run.
@@ -475,22 +335,21 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, rep pr
 	var resumeState types.RunState
 	resuming := cfg.Resume
 	if resuming {
-		st, err := findResumableRun(repoRoot, cfg)
+		rs, err := findResumableRun(st, cfg)
 		if err != nil {
 			return err
 		}
-		resumeState = st
-		runTimestamp = st.Timestamp
+		resumeState = rs
+		runTimestamp = rs.Timestamp
 	} else {
 		runTimestamp = fmt.Sprintf("%d", runStart.UnixMilli())
 	}
-	runDir := runDirPath(repoRoot, cfg.SkillName, runTimestamp)
 	skillMdPath := filepath.Join(cfg.SkillDir, "SKILL.md")
 
-	// Persist LogLine events to the run dir so past runs can replay their output.
+	// Persist LogLine events to the store so past runs can replay their output.
 	// The tee wraps the raw reporter; WithScope layers on top so each line it sees
 	// already carries its final iteration/scenario/eval scope.
-	logTee := progress.NewLogTee(rep, filepath.Join(runDir, "logs.jsonl"))
+	logTee := progress.NewLogTee(rep, st, cfg.SkillName, runTimestamp)
 	defer logTee.Close()
 	// Scope all run-level logs to iter -1 so they read as run-level (not iteration
 	// 0). Per-iteration and per-scenario scopes are derived from this as we descend.
@@ -549,12 +408,12 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, rep pr
 	// completed marks the run's checkpoint Done: true on a natural end (so resume
 	// skips it), false on a graceful stop (so it stays resumable).
 	finalize := func(bestScore float64, bestSha string, completed bool) error {
-		if st, err := loadRunState(runDir); err == nil {
-			st.Done = completed
-			st.BestScore = bestScore * 100
-			st.BestSha = bestSha
-			st.TotalCost = totalCost
-			_ = saveRunState(runDir, st)
+		if rs, ok, err := st.GetRunState(cfg.SkillName, runTimestamp); err == nil && ok {
+			rs.Done = completed
+			rs.BestScore = bestScore * 100
+			rs.BestSha = bestSha
+			rs.TotalCost = totalCost
+			_ = st.UpsertRun(rs)
 		}
 
 		tag := ""
@@ -565,8 +424,7 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, rep pr
 			}
 		}
 
-		runsDir := filepath.Join(repoRoot, ".papi", "skills", cfg.SkillName, "runs")
-		if err := purgeOldRuns(runsDir, cfg.MaxRuns, rep); err != nil {
+		if err := purgeOldRuns(st, repoRoot, cfg.SkillName, cfg.MaxRuns, rep); err != nil {
 			return fmt.Errorf("purge old runs: %w", err)
 		}
 
@@ -602,8 +460,7 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, rep pr
 			}
 		}
 		// Rebuild prevResults from the last completed iteration for the research prompt.
-		lastDir := iterationDirPath(repoRoot, cfg.SkillName, runTimestamp, resumeState.LastCompletedIteration)
-		if pr, err := loadIterationResults(lastDir); err == nil {
+		if pr, err := st.ScenarioResults(cfg.SkillName, runTimestamp, resumeState.LastCompletedIteration); err == nil {
 			prevResults = pr
 		}
 		rep.Emit(progress.LogLine{Text: fmt.Sprintf("Resuming run %s from iteration %d (best %s, spent $%.2f)",
@@ -614,13 +471,13 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, rep pr
 		rep.Emit(progress.IterationStarted{Iter: 0, Best: 0})
 		baselineDir := iterationDirPath(repoRoot, cfg.SkillName, runTimestamp, 0)
 		_ = os.MkdirAll(baselineDir, 0755)
-		snapshotSkillMd(cfg.SkillDir, baselineDir)
+		baselineSkillMd := snapshotSkillMd(cfg.SkillDir)
 		baselineResults, baselineCost, err := runAllScenarios(ctx, 0, scenarios, cfg, evalList, baselineDir, hooks, hooksBaseDir, progress.WithScope(rep, 0, "", ""), stream)
 		totalCost += baselineCost
 		if err != nil {
 			if ctx.Err() != nil {
 				score := scorer.AggregateScore(baselineResults)
-				_ = saveIterationResults(baselineDir, baselineResults, score, time.Since(iterStart).Milliseconds())
+				_ = st.SaveIteration(cfg.SkillName, runTimestamp, 0, score, time.Since(iterStart).Milliseconds(), "", baselineSkillMd, baselineResults)
 				rep.Emit(progress.LogLine{Text: "Stopped."})
 				return finalize(score, "", false)
 			}
@@ -630,7 +487,7 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, rep pr
 		baselineMs := time.Since(iterStart).Milliseconds()
 		rep.Emit(progress.IterationDone{Iter: 0, Score: bestScore, Cost: baselineCost, DurationMs: baselineMs, Results: baselineResults})
 
-		if err := saveIterationResults(baselineDir, baselineResults, bestScore, baselineMs); err != nil {
+		if err := st.SaveIteration(cfg.SkillName, runTimestamp, 0, bestScore, baselineMs, "", baselineSkillMd, baselineResults); err != nil {
 			return err
 		}
 
@@ -642,7 +499,7 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, rep pr
 			}
 		}
 
-		if err := saveRunState(runDir, types.RunState{
+		if err := st.UpsertRun(types.RunState{
 			Skill: cfg.SkillName, Timestamp: runTimestamp,
 			BestScore: bestScore * 100, BestSha: bestSha,
 			LastCompletedIteration: 0, TotalCost: totalCost,
@@ -712,15 +569,12 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, rep pr
 
 		iterDir := iterationDirPath(repoRoot, cfg.SkillName, runTimestamp, iter)
 		_ = os.MkdirAll(iterDir, 0755)
-		snapshotSkillMd(cfg.SkillDir, iterDir)
-		if description != "" {
-			_ = os.WriteFile(filepath.Join(iterDir, "experiment.txt"), []byte(description), 0644)
-		}
+		iterSkillMd := snapshotSkillMd(cfg.SkillDir)
 		iterResults, iterCost, err := runAllScenarios(ctx, iter, scenarios, cfg, evalList, iterDir, hooks, hooksBaseDir, iterRep, stream)
 		totalCost += iterCost
 		if err != nil {
 			if ctx.Err() != nil {
-				_ = saveIterationResults(iterDir, iterResults, scorer.AggregateScore(iterResults), time.Since(iterStart).Milliseconds())
+				_ = st.SaveIteration(cfg.SkillName, runTimestamp, iter, scorer.AggregateScore(iterResults), time.Since(iterStart).Milliseconds(), description, iterSkillMd, iterResults)
 				// Restore best SKILL.md so a half-finished iteration is not left on disk.
 				if !cfg.DryRun && bestSha != "" {
 					_ = git.RevertSkillFile(filepath.Join(cfg.SkillDir, "SKILL.md"), bestSha)
@@ -735,7 +589,7 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, rep pr
 		improved := iterScore > bestScore
 		iterMs := time.Since(iterStart).Milliseconds()
 
-		if err := saveIterationResults(iterDir, iterResults, iterScore, iterMs); err != nil {
+		if err := st.SaveIteration(cfg.SkillName, runTimestamp, iter, iterScore, iterMs, description, iterSkillMd, iterResults); err != nil {
 			return err
 		}
 
@@ -762,7 +616,7 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, rep pr
 		}
 
 		// Checkpoint the run so it can be resumed from the next iteration.
-		if err := saveRunState(runDir, types.RunState{
+		if err := st.UpsertRun(types.RunState{
 			Skill: cfg.SkillName, Timestamp: runTimestamp,
 			BestScore: bestScore * 100, BestSha: bestSha,
 			LastCompletedIteration: iter, TotalCost: totalCost,
