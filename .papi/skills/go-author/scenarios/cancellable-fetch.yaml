@@ -1,0 +1,6 @@
+id: cancellable-fetch
+prompt: |
+  Write a Go function that fetches several URLs concurrently and returns their
+  results, but can be cancelled or made to stop after a deadline so it never
+  hangs. Save the code to fetch.go in the current directory.
+tags: [concurrency, context]

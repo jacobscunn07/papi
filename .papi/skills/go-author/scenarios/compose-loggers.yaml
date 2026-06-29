@@ -1,0 +1,7 @@
+id: compose-loggers
+prompt: |
+  Design a small Go logging library where different logger behaviors (for example
+  a timestamping logger and a level-filtering logger) can be combined, and where
+  calling code can depend on a minimal logging abstraction rather than a concrete
+  type. Write the types to logger.go in the current directory.
+tags: [design, composition]
