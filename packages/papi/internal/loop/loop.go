@@ -485,7 +485,7 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, st *st
 		}
 		bestScore = scorer.AggregateScore(baselineResults)
 		baselineMs := time.Since(iterStart).Milliseconds()
-		rep.Emit(progress.IterationDone{Iter: 0, Score: bestScore, Cost: baselineCost, DurationMs: baselineMs, Results: baselineResults})
+		rep.Emit(progress.IterationDone{Iter: 0, Score: bestScore, Cost: baselineCost, DurationMs: baselineMs, Results: baselineResults, SkillMd: baselineSkillMd})
 
 		if err := st.SaveIteration(cfg.SkillName, runTimestamp, 0, bestScore, baselineMs, "", baselineSkillMd, baselineResults); err != nil {
 			return err
@@ -593,7 +593,7 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, st *st
 			return err
 		}
 
-		rep.Emit(progress.IterationDone{Iter: iter, Score: iterScore, Delta: delta, Improved: improved, Cost: iterCost, DurationMs: iterMs, Results: iterResults})
+		rep.Emit(progress.IterationDone{Iter: iter, Score: iterScore, Delta: delta, Improved: improved, Cost: iterCost, DurationMs: iterMs, Results: iterResults, SkillMd: iterSkillMd})
 
 		if !cfg.DryRun {
 			if improved {

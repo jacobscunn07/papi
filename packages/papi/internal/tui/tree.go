@@ -30,6 +30,7 @@ type row struct {
 	expandable bool
 	expanded   bool
 	live       bool
+	running    bool // actively running right now (has a live-status entry) — drives the spinner
 
 	// verdict for iteration rows: whether this mutation survived selection.
 	kept     bool
@@ -151,6 +152,7 @@ func (m *model) emitIteration(rows *[]row, rk string, r *runs.Run, it *runs.Iter
 		expandable: len(it.Scenarios) > 0,
 		expanded:   expanded,
 		live:       live,
+		running:    m.liveStatus[ik] != "",
 		kept:       kept,
 		reverted:   reverted,
 		iter:       it,
@@ -183,6 +185,7 @@ func (m *model) emitScenario(rows *[]row, ik string, sc *runs.Scenario, live boo
 		expandable: len(sc.Transcripts)+len(sc.Files)+len(sc.Result.EvalResults) > 0,
 		expanded:   expanded,
 		live:       live,
+		running:    m.liveStatus[sk] != "",
 		scen:       sc,
 	})
 	if !expanded {
@@ -285,8 +288,8 @@ func renderRow(r row, selected bool, width int, spin string) string {
 		} else {
 			badge = "● " + badge
 		}
-	case r.live && badge != "" && badge != "done":
-		badge = spin + " " + badge // animate the actively-running node
+	case r.running && badge != "":
+		badge = spin + " " + badge // animate only the actively-running node
 	}
 
 	plain := indent + arrow + verdict + r.name + scorePart

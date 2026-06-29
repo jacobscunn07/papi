@@ -724,6 +724,7 @@ func (m *model) applyEvent(e progress.Event) {
 		if it := m.liveIter(ev.Iter); it != nil {
 			it.Score = ev.Score
 			it.DurationMs = ev.DurationMs
+			it.SetSkillMd(ev.SkillMd)
 		}
 		delete(m.liveStatus, iterKey(runKey(m.live.Timestamp), ev.Iter))
 

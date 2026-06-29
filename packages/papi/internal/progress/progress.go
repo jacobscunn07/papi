@@ -101,7 +101,9 @@ type ScenarioDone struct {
 }
 
 // IterationDone is emitted when an iteration completes and has been scored.
-// Iter 0 is the baseline (Delta is not meaningful).
+// Iter 0 is the baseline (Delta is not meaningful). SkillMd is the SKILL.md
+// snapshot that ran this iteration, so the live TUI can diff it against the
+// previous iteration without re-reading from the store.
 type IterationDone struct {
 	Iter       int
 	Score      float64
@@ -110,6 +112,7 @@ type IterationDone struct {
 	Cost       float64
 	DurationMs int64
 	Results    []types.ScenarioRunResult
+	SkillMd    string
 }
 
 // RunDone is emitted once at the end of a run.

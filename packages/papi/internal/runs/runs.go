@@ -85,6 +85,10 @@ type Iteration struct {
 // SkillMd returns the SKILL.md snapshot that ran for this iteration.
 func (it *Iteration) SkillMd() string { return it.skillMd }
 
+// SetSkillMd records the SKILL.md snapshot for this iteration. Used by the TUI to
+// populate a live iteration (built from progress events, not the store).
+func (it *Iteration) SetSkillMd(s string) { it.skillMd = s }
+
 // Scenario is one scenario's result within an iteration.
 type Scenario struct {
 	ID          string
