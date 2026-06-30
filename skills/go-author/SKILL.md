@@ -14,6 +14,7 @@ license: MIT
 - Default to a runnable file: a `main.go` with `package main` and `func main` for a program, or a named package file plus a `_test.go` for a library.
 - The code must **compile** and be **`gofmt`-clean**: tabs for indentation (never spaces), grouped imports, no unused imports or variables.
 - Never truncate. No `// ...`, no "the rest would go here", no prose describing code where the code belongs.
+- If you write tests, **run them** (`go test ./...`) and paste the actual output. Do not claim "tests pass" without showing it.
 
 ## THE NON-NEGOTIABLE RULES
 
@@ -56,14 +57,14 @@ func main() {
 ### RULE 3: Idiomatic naming and API shape
 - `MixedCaps` for exported, `mixedCaps` for unexported — never `snake_case`.
 - Short names for short scopes (`i`, `r`, `buf`); descriptive names for package-level identifiers.
-- Keep the exported surface small. Accept interfaces, return concrete types. Name single-method interfaces with the `-er` suffix (`Reader`, `Writer`).
+- Keep the exported surface small. **Accept interfaces, return concrete types.** Name single-method interfaces with the `-er` suffix (`Reader`, `Writer`).
 - Package names are short, lowercase, no underscores; the name is part of the API (`bytes.Buffer`, not `bytes.BytesBuffer`).
 
 ### RULE 4: Prefer the standard library
 Reach for `fmt`, `errors`, `os`, `io`, `bufio`, `strings`, `strconv`, `net/http`, `encoding/json`, `context`, `testing` before any third-party dependency. Only add a module dependency when the stdlib genuinely lacks the capability, and say why.
 
-### RULE 5: Tests are table-driven
-For any non-trivial library function, emit a `_test.go` with a table-driven test using subtests. Use `t.Run`, compare with `reflect.DeepEqual` for composite values, and prefer `t.Fatalf`/`t.Errorf` with clear messages.
+### RULE 5: Tests are table-driven AND run
+For any non-trivial library function, emit a `_test.go` with a table-driven test using subtests. Use `t.Run`, compare with `reflect.DeepEqual` for composite values, and prefer `t.Fatalf`/`t.Errorf` with clear messages. **Then actually run `go test ./...` and paste the output.** Never assert "all tests pass" without showing the command output.
 
 ```go
 func TestSum(t *testing.T) {
@@ -88,7 +89,41 @@ func TestSum(t *testing.T) {
 ### RULE 6: Safe concurrency
 Use goroutines with a clear lifecycle. Propagate cancellation with `context.Context` (first parameter, named `ctx`). Synchronize with `sync.WaitGroup` / channels; guard shared state with a mutex. Never leak a goroutine — every one you start must have a way to finish. Code must be clean under `go test -race`.
 
-### RULE 7: Emit complete, runnable files
+### RULE 7: Compose with small interfaces and embedding
+**Default to composition, not concrete-struct-only designs.** Any time you have a dependency a caller might want to swap (file I/O, clock, logger, HTTP client, config source, decoder), define a **small, single-method interface** and accept it. Embed types to extend behavior rather than wrapping with delegation methods.
+
+Examples of the pattern:
+
+```go
+// ✅ Accept an interface — testable, swappable
+type ConfigSource interface {
+	Read() ([]byte, error)
+}
+
+type fileSource struct{ path string }
+
+func (f fileSource) Read() ([]byte, error) { return os.ReadFile(f.path) }
+
+func Load(src ConfigSource) (*Config, error) {
+	b, err := src.Read()
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	// ...
+}
+```
+
+```go
+// ✅ Embedding to extend, not inherit
+type timingLogger struct {
+	Logger // embedded — promotes its methods
+	clock func() time.Time
+}
+```
+
+Even for file-reading config loaders, prefer an `io.Reader`-or-interface seam over hardcoded `os.ReadFile` calls so tests can drive the code without touching disk.
+
+### RULE 8: Emit complete, runnable files
 Every file referenced appears in full. A program includes its `package main`, imports, and `func main`. A library file compiles on its own. Mentally run `go build ./...` and `gofmt` before sending.
 
 ## PROJECT LAYOUT
@@ -113,7 +148,7 @@ myapp/
 
 Trigger on "review this Go", "improve", "refactor", "fix", "clean up", "idiomatic?", "what's wrong with". Always emit the **complete rewritten file(s)** as ```go blocks, then a brief change log after the code — never a bullet list in place of code, never `// unchanged`.
 
-Scan against rules 1–7: unchecked errors, non-idiomatic names, spaces-not-tabs, missing tests, goroutine leaks, needless dependencies, truncated output.
+Scan against rules 1–8: unchecked errors, non-idiomatic names, spaces-not-tabs, missing tests/test-output, goroutine leaks, needless dependencies, concrete-struct-only designs with no seams, truncated output.
 
 ## SELF-CHECK BEFORE SENDING
 
@@ -124,6 +159,7 @@ Scan against rules 1–7: unchecked errors, non-idiomatic names, spaces-not-tabs
 | ☐ | Every `error` is checked and wrapped with context; `main` exits non-zero on failure |
 | ☐ | Names are `MixedCaps`/`mixedCaps`, packages short and lowercase; exported surface is minimal |
 | ☐ | Standard library preferred; any third-party dependency is justified |
-| ☐ | Non-trivial logic has a table-driven `_test.go` |
+| ☐ | At least one small interface or embedded type creates a seam for swappable dependencies |
+| ☐ | Non-trivial logic has a table-driven `_test.go`, and `go test` output is shown |
 | ☐ | Concurrency uses `context`, has no leaks, and is race-clean |
 | ☐ | Files are complete — no truncation, no prose substituting for code |
