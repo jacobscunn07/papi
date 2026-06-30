@@ -683,6 +683,7 @@ func (m *model) applyEvent(e progress.Event) {
 	case progress.ResearchAgentDone:
 		if it := m.liveIter(ev.Iter); it != nil {
 			it.Experiment = ev.Description
+			it.SetSkillMd(ev.SkillMd)
 		}
 
 	case progress.ScenarioStarted:

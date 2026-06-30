@@ -4,8 +4,37 @@ import (
 	"strings"
 	"testing"
 
+	"papi/internal/progress"
 	"papi/internal/runs"
 )
+
+// TestResearchAgentDoneDeliversSkillMd verifies the live iteration carries its
+// proposed SKILL.md as soon as ResearchAgentDone arrives — before any
+// IterationDone — so the diff renders correctly mid-iteration.
+func TestResearchAgentDoneDeliversSkillMd(t *testing.T) {
+	m := &model{
+		mode:       modeBrowse,
+		skillName:  "go-author",
+		liveStatus: map[string]string{},
+		streams:    map[string]*strings.Builder{},
+		expanded:   map[string]bool{},
+	}
+	// Viewports are left at zero width so refreshDetail/refreshLog no-op in tests.
+	m.applyEvent(progress.RunStarted{Skill: "go-author", Timestamp: "1000", ScenarioIDs: []string{"s1"}})
+	m.applyEvent(progress.IterationStarted{Iter: 1})
+	m.applyEvent(progress.ResearchAgentDone{Iter: 1, Description: "tweak", SkillMd: "---\nnew skill\n---"})
+
+	it := m.liveIter(1)
+	if it == nil {
+		t.Fatal("expected live iteration 1")
+	}
+	if got := it.SkillMd(); got != "---\nnew skill\n---" {
+		t.Fatalf("iteration snapshot not set from ResearchAgentDone: %q", got)
+	}
+	if it.Experiment != "tweak" {
+		t.Fatalf("experiment = %q, want %q", it.Experiment, "tweak")
+	}
+}
 
 // TestRunningFlagGatesSpinner verifies that only the iteration with a live-status
 // entry is marked running (and thus animated), while a completed iteration of the

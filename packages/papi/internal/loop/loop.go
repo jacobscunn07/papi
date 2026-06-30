@@ -559,7 +559,7 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, st *st
 			return fmt.Errorf("research agent iter %d: %w", iter, err)
 		}
 		totalCost += agentCost
-		rep.Emit(progress.ResearchAgentDone{Iter: iter, Description: description, Cost: agentCost})
+		rep.Emit(progress.ResearchAgentDone{Iter: iter, Description: description, Cost: agentCost, SkillMd: proposedSkillMd})
 
 		if !cfg.DryRun {
 			if err := os.WriteFile(filepath.Join(cfg.SkillDir, "SKILL.md"), []byte(proposedSkillMd), 0644); err != nil {
@@ -569,7 +569,10 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, st *st
 
 		iterDir := iterationDirPath(repoRoot, cfg.SkillName, runTimestamp, iter)
 		_ = os.MkdirAll(iterDir, 0755)
-		iterSkillMd := snapshotSkillMd(cfg.SkillDir)
+		// The snapshot for this iteration is the proposal itself — what the agent
+		// changed and (in non-dry-run) what ran. Using the proposal directly keeps
+		// live, persisted, and dry-run views consistent.
+		iterSkillMd := proposedSkillMd
 		iterResults, iterCost, err := runAllScenarios(ctx, iter, scenarios, cfg, evalList, iterDir, hooks, hooksBaseDir, iterRep, stream)
 		totalCost += iterCost
 		if err != nil {

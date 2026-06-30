@@ -60,10 +60,13 @@ type IterationStarted struct {
 }
 
 // ResearchAgentDone is emitted after the research agent proposes a new SKILL.md.
+// SkillMd is the proposed SKILL.md, delivered here (before scenarios run) so the
+// live TUI can show the iteration's diff as soon as the experiment appears.
 type ResearchAgentDone struct {
 	Iter        int
 	Description string
 	Cost        float64
+	SkillMd     string
 }
 
 // ScenarioStarted is emitted when a scenario begins running.
