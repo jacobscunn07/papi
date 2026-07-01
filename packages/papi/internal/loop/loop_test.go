@@ -1,11 +1,47 @@
 package loop
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"papi/internal/progress"
 	"papi/internal/store"
 	"papi/internal/types"
 )
+
+// TestRunAllScenariosReusesCompleted verifies that scenarios already completed in an
+// interrupted run are reused as-is, without being re-executed (which would shell out
+// to the claude CLI). When every scenario is cached, no invocation happens at all.
+func TestRunAllScenariosReusesCompleted(t *testing.T) {
+	skillDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"),
+		[]byte("---\nname: demo\ndescription: a demo skill\n---\nbody\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &types.ResearchConfig{SkillName: "demo", SkillDir: skillDir}
+	scenarios := []types.Scenario{{ID: "a"}, {ID: "b"}}
+	completed := []types.ScenarioRunResult{
+		{Scenario: types.Scenario{ID: "a"}, ScenarioScore: 0.4, Invoked: true},
+		{Scenario: types.Scenario{ID: "b"}, ScenarioScore: 0.6, Invoked: true},
+	}
+
+	results, cost, err := runAllScenarios(context.Background(), 0, scenarios, cfg, nil,
+		t.TempDir(), nil, "", progress.NopReporter{}, false, completed, nil)
+	if err != nil {
+		t.Fatalf("unexpected error (did it try to execute a scenario?): %v", err)
+	}
+	if cost != 0 {
+		t.Fatalf("reused scenarios should add no cost, got %v", cost)
+	}
+	if len(results) != 2 || results[0].Scenario.ID != "a" || results[1].Scenario.ID != "b" {
+		t.Fatalf("results = %+v, want the two cached scenarios in order", results)
+	}
+	if results[0].ScenarioScore != 0.4 || results[1].ScenarioScore != 0.6 {
+		t.Fatalf("reused scores not preserved: %+v", results)
+	}
+}
 
 // seedRun writes a run-level checkpoint to the store the way the loop persists them.
 func seedRun(t *testing.T, st *store.Store, state types.RunState) {
@@ -98,6 +134,28 @@ func TestFindResumableRun(t *testing.T) {
 		}
 		if got.Timestamp != "1000" {
 			t.Fatalf("got run %s, want 1000 now-eligible under a higher iteration cap", got.Timestamp)
+		}
+	})
+
+	t.Run("a run interrupted during the baseline is resumable", func(t *testing.T) {
+		st := openStore(t)
+		// The up-front checkpoint: a real run (MaxIterations > 0) whose baseline never
+		// completed (LastCompletedIteration: -1). It must be discoverable and resumable.
+		seedRun(t, st, types.RunState{Skill: skill, Timestamp: "1000", LastCompletedIteration: -1, TotalCost: 0.5, MaxIterations: 10, Budget: 5.0})
+
+		if _, ok, err := st.GetRunState(skill, "1000"); err != nil || !ok {
+			t.Fatalf("GetRunState ok=%v err=%v, want a real run", ok, err)
+		}
+		states, err := st.RunStates(skill)
+		if err != nil || len(states) != 1 {
+			t.Fatalf("RunStates = %+v err=%v, want the baseline-interrupted run", states, err)
+		}
+		got, err := findResumableRun(st, cfg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.Timestamp != "1000" || got.LastCompletedIteration != -1 {
+			t.Fatalf("got %+v, want resumable baseline-interrupted run 1000 (LCI -1)", got)
 		}
 	})
 }

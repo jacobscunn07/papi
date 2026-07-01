@@ -102,10 +102,19 @@ func runAllScenarios(
 	hooksBaseDir string,
 	rep progress.Reporter,
 	stream bool,
+	completed []types.ScenarioRunResult,
+	onScenarioDone func(results []types.ScenarioRunResult),
 ) ([]types.ScenarioRunResult, float64, error) {
 	desc, content, _, err := config.ReadSkillMd(cfg.SkillDir)
 	if err != nil {
 		return nil, 0, fmt.Errorf("read SKILL.md: %w", err)
+	}
+
+	// Already-completed scenarios (from an interrupted run being resumed) are reused
+	// rather than re-executed, so resume picks up where it stopped.
+	done := make(map[string]types.ScenarioRunResult, len(completed))
+	for _, r := range completed {
+		done[r.Scenario.ID] = r
 	}
 
 	var totalCost float64
@@ -115,8 +124,20 @@ func runAllScenarios(
 		if ctx.Err() != nil {
 			return results, totalCost, ctx.Err()
 		}
-		scenarioDir := filepath.Join(iterationDir, scenario.ID)
 		rep.Emit(progress.ScenarioStarted{Iter: iter, ID: scenario.ID})
+
+		// Reuse a previously-completed scenario: replay its events for the TUI and
+		// skip the (expensive) invocation, scoring, hooks, and cost.
+		if cached, ok := done[scenario.ID]; ok {
+			for _, er := range cached.EvalResults {
+				rep.Emit(progress.EvalDone{Iter: iter, ScenarioID: scenario.ID, Eval: er})
+			}
+			results = append(results, cached)
+			rep.Emit(progress.ScenarioDone{Iter: iter, Result: cached})
+			continue
+		}
+
+		scenarioDir := filepath.Join(iterationDir, scenario.ID)
 
 		// Scope logs emitted while this scenario runs (and scores) to it, so the
 		// TUI can filter the log panel to the selected scenario node.
@@ -179,6 +200,12 @@ func runAllScenarios(
 		results = append(results, result)
 
 		rep.Emit(progress.ScenarioDone{Iter: iter, Result: result})
+
+		// Checkpoint progress after each scenario so a stop/crash mid-iteration can be
+		// resumed from the next scenario rather than restarting the iteration.
+		if onScenarioDone != nil {
+			onScenarioDone(results)
+		}
 	}
 
 	return results, totalCost, nil
@@ -387,6 +414,20 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, st *st
 		ResumeFrom:    resumeFrom,
 	})
 
+	// Checkpoint the run up front (max_iterations > 0 marks it as a real run) so it
+	// can be continued even if it is stopped, errors, or crashes during the baseline
+	// — before iteration 0 has had a chance to write its own checkpoint. The sentinel
+	// LastCompletedIteration: -1 signals "baseline not done", so resume re-runs it.
+	if !resuming {
+		if err := st.UpsertRun(types.RunState{
+			Skill: cfg.SkillName, Timestamp: runTimestamp,
+			LastCompletedIteration: -1,
+			MaxIterations:          cfg.MaxIterations, Budget: cfg.MaxBudgetUSD,
+		}); err != nil {
+			return err
+		}
+	}
+
 	evalIDs := make([]string, len(evalList))
 	for i, e := range evalList {
 		evalIDs[i] = e.ID()
@@ -448,7 +489,12 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, st *st
 	var bestSha string
 	var prevResults []types.ScenarioRunResult
 
-	if resuming {
+	// A baseline-interrupted run (LastCompletedIteration < 0) has no usable checkpoint
+	// to continue from, so resuming it re-runs the baseline below rather than restoring
+	// state and skipping to a later iteration.
+	resumeFromCheckpoint := resuming && resumeState.LastCompletedIteration >= 0
+
+	if resumeFromCheckpoint {
 		bestScore = resumeState.BestScore / 100.0
 		bestSha = resumeState.BestSha
 		totalCost = resumeState.TotalCost
@@ -466,13 +512,27 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, st *st
 		rep.Emit(progress.LogLine{Text: fmt.Sprintf("Resuming run %s from iteration %d (best %s, spent $%.2f)",
 			runTimestamp, resumeFrom, pct(bestScore), totalCost)})
 	} else {
+		// Reuse scenarios already completed in an interrupted baseline so resume
+		// continues from where it stopped instead of re-running them.
+		var baselineCompleted []types.ScenarioRunResult
+		if resuming {
+			totalCost = resumeState.TotalCost
+			baselineCompleted, _ = st.ScenarioResults(cfg.SkillName, runTimestamp, 0)
+			rep.Emit(progress.LogLine{Text: fmt.Sprintf("Resuming run %s: continuing the interrupted baseline (reusing %d completed scenario(s), spent $%.2f)",
+				runTimestamp, len(baselineCompleted), totalCost)})
+		}
 		// Baseline (iteration 0)
 		iterStart := time.Now()
 		rep.Emit(progress.IterationStarted{Iter: 0, Best: 0})
 		baselineDir := iterationDirPath(repoRoot, cfg.SkillName, runTimestamp, 0)
 		_ = os.MkdirAll(baselineDir, 0755)
 		baselineSkillMd := snapshotSkillMd(cfg.SkillDir)
-		baselineResults, baselineCost, err := runAllScenarios(ctx, 0, scenarios, cfg, evalList, baselineDir, hooks, hooksBaseDir, progress.WithScope(rep, 0, "", ""), stream)
+		// Checkpoint each completed scenario so a stop/crash mid-baseline resumes cleanly.
+		persistBaseline := func(partial []types.ScenarioRunResult) {
+			_ = st.SaveIteration(cfg.SkillName, runTimestamp, 0, scorer.AggregateScore(partial),
+				time.Since(iterStart).Milliseconds(), "", baselineSkillMd, partial)
+		}
+		baselineResults, baselineCost, err := runAllScenarios(ctx, 0, scenarios, cfg, evalList, baselineDir, hooks, hooksBaseDir, progress.WithScope(rep, 0, "", ""), stream, baselineCompleted, persistBaseline)
 		totalCost += baselineCost
 		if err != nil {
 			if ctx.Err() != nil {
@@ -520,9 +580,30 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, st *st
 	}
 
 	startIter := 1
-	if resuming {
+	if resumeFromCheckpoint {
 		startIter = resumeFrom
 	}
+
+	// Detect an iteration that was interrupted partway through its scenarios: it has
+	// saved scenario rows at startIter (a completed iteration would have advanced the
+	// checkpoint; an unstarted one has no rows). Resuming it reuses the proposal that
+	// was being evaluated and its completed scenarios, so the research agent is not
+	// re-run and finished scenarios are not repeated.
+	var partialResults []types.ScenarioRunResult
+	var partialSkillMd, partialExperiment string
+	if resumeFromCheckpoint {
+		if pr, err := st.ScenarioResults(cfg.SkillName, runTimestamp, startIter); err == nil && len(pr) > 0 {
+			partialResults = pr
+			if iters, err := st.Iterations(cfg.SkillName, runTimestamp); err == nil {
+				for _, m := range iters {
+					if m.Index == startIter {
+						partialSkillMd, partialExperiment = m.SkillMd, m.Experiment
+					}
+				}
+			}
+		}
+	}
+
 	for iter := startIter; iter <= cfg.MaxIterations; iter++ {
 		if ctx.Err() != nil {
 			rep.Emit(progress.LogLine{Text: "Stopped."})
@@ -548,18 +629,29 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, st *st
 			}
 		}
 
-		currentSkillMdBytes, err := os.ReadFile(filepath.Join(cfg.SkillDir, "SKILL.md"))
-		if err != nil {
-			return err
-		}
-		agentPrompt := buildResearchPrompt(string(currentSkillMdBytes), prevResults, bestScore, iter)
+		var description, proposedSkillMd string
+		var completed []types.ScenarioRunResult
+		if iter == startIter && partialResults != nil && partialSkillMd != "" {
+			// Resume an interrupted iteration: reuse the proposal that was being
+			// evaluated and the scenarios already completed against it; skip the agent.
+			description, proposedSkillMd, completed = partialExperiment, partialSkillMd, partialResults
+			rep.Emit(progress.LogLine{Text: fmt.Sprintf("Continuing interrupted iteration %d: reusing %d completed scenario(s).", iter, len(completed))})
+			rep.Emit(progress.ResearchAgentDone{Iter: iter, Description: description, Cost: 0, SkillMd: proposedSkillMd})
+		} else {
+			currentSkillMdBytes, err := os.ReadFile(filepath.Join(cfg.SkillDir, "SKILL.md"))
+			if err != nil {
+				return err
+			}
+			agentPrompt := buildResearchPrompt(string(currentSkillMdBytes), prevResults, bestScore, iter)
 
-		description, proposedSkillMd, agentCost, err := callResearchAgent(agentPrompt, programMd, cfg.ResearchModel)
-		if err != nil {
-			return fmt.Errorf("research agent iter %d: %w", iter, err)
+			var agentCost float64
+			description, proposedSkillMd, agentCost, err = callResearchAgent(agentPrompt, programMd, cfg.ResearchModel)
+			if err != nil {
+				return fmt.Errorf("research agent iter %d: %w", iter, err)
+			}
+			totalCost += agentCost
+			rep.Emit(progress.ResearchAgentDone{Iter: iter, Description: description, Cost: agentCost, SkillMd: proposedSkillMd})
 		}
-		totalCost += agentCost
-		rep.Emit(progress.ResearchAgentDone{Iter: iter, Description: description, Cost: agentCost, SkillMd: proposedSkillMd})
 
 		if !cfg.DryRun {
 			if err := os.WriteFile(filepath.Join(cfg.SkillDir, "SKILL.md"), []byte(proposedSkillMd), 0644); err != nil {
@@ -573,7 +665,12 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, st *st
 		// changed and (in non-dry-run) what ran. Using the proposal directly keeps
 		// live, persisted, and dry-run views consistent.
 		iterSkillMd := proposedSkillMd
-		iterResults, iterCost, err := runAllScenarios(ctx, iter, scenarios, cfg, evalList, iterDir, hooks, hooksBaseDir, iterRep, stream)
+		// Checkpoint each completed scenario so a stop/crash mid-iteration resumes cleanly.
+		persistIter := func(partial []types.ScenarioRunResult) {
+			_ = st.SaveIteration(cfg.SkillName, runTimestamp, iter, scorer.AggregateScore(partial),
+				time.Since(iterStart).Milliseconds(), description, iterSkillMd, partial)
+		}
+		iterResults, iterCost, err := runAllScenarios(ctx, iter, scenarios, cfg, evalList, iterDir, hooks, hooksBaseDir, iterRep, stream, completed, persistIter)
 		totalCost += iterCost
 		if err != nil {
 			if ctx.Err() != nil {

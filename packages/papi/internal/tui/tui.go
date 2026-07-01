@@ -324,9 +324,23 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = "run complete"
 		}
 		if m.live != nil {
-			m.liveStatus[runKey(m.live.Timestamp)] = "done"
+			ts := m.live.Timestamp
+			// Reload from the store so the just-stopped run moves from m.live into
+			// pastRuns; its persisted Done=false checkpoint makes it resumable, so 'c'
+			// continues it immediately without leaving the view. Disk writes are done by
+			// now (the channel closes after loop.Run returns).
+			if rs, err := runs.ListRuns(m.store, m.skillName); err == nil {
+				m.pastRuns = rs
+				m.live = nil
+				m.rebuild(false)
+				m.selectKey(runKey(ts)) // keep the run node selected so 'c' works
+			} else {
+				m.liveStatus[runKey(ts)] = "done"
+				m.rebuild(false)
+			}
+		} else {
+			m.rebuild(false)
 		}
-		m.rebuild(false)
 		return m, nil
 	}
 

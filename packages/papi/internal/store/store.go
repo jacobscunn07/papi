@@ -124,18 +124,21 @@ func (s *Store) GetRunState(skill, ts string) (st types.RunState, ok bool, err e
 		return st, false, err
 	}
 	st.Done = done != 0
-	// A run with no baseline checkpoint is not a real, resumable run.
-	return st, st.LastCompletedIteration >= 0, nil
+	// A real run has an explicit checkpoint (max_iterations > 0, set by UpsertRun).
+	// The minimal placeholder rows from ensureRunID have max_iterations = 0 and are
+	// not real, resumable runs — even if a partial baseline iteration was saved.
+	return st, st.MaxIterations > 0, nil
 }
 
 // RunStates returns the checkpointed runs for a skill, oldest first by numeric
-// timestamp. Only runs with a baseline checkpoint are returned.
+// timestamp. Only runs with an explicit checkpoint (max_iterations > 0) are
+// returned; minimal placeholder rows from ensureRunID are excluded.
 func (s *Store) RunStates(skill string) ([]types.RunState, error) {
 	rows, err := s.db.Query(`
 		SELECT skill, timestamp, best_score, best_sha, last_completed_iteration,
 			total_cost, max_iterations, budget, done, updated_at
 		FROM runs
-		WHERE skill=? AND last_completed_iteration >= 0
+		WHERE skill=? AND max_iterations > 0
 		ORDER BY CAST(timestamp AS INTEGER), timestamp`, skill)
 	if err != nil {
 		return nil, err

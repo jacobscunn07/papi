@@ -10,9 +10,9 @@ CREATE TABLE IF NOT EXISTS runs (
 	timestamp                TEXT    NOT NULL,
 	best_score               REAL    NOT NULL DEFAULT 0,   -- 0..100
 	best_sha                 TEXT    NOT NULL DEFAULT '',
-	last_completed_iteration INTEGER NOT NULL DEFAULT -1,  -- -1 = no baseline checkpoint yet
+	last_completed_iteration INTEGER NOT NULL DEFAULT -1,  -- -1 = baseline not completed (resume re-runs it)
 	total_cost               REAL    NOT NULL DEFAULT 0,
-	max_iterations           INTEGER NOT NULL DEFAULT 0,
+	max_iterations           INTEGER NOT NULL DEFAULT 0,   -- > 0 marks a real run vs. an ensureRunID placeholder
 	budget                   REAL    NOT NULL DEFAULT 0,
 	done                     INTEGER NOT NULL DEFAULT 0,
 	updated_at               TEXT    NOT NULL DEFAULT '',
