@@ -1,4 +1,4 @@
-// Package runs reads back run history from the store (.papi/papi.db) so the TUI
+// Package runs reads back run history from the store (.papi/db/papi.db) so the TUI
 // can browse past and in-progress runs. Per-scenario transcripts and the SKILL.md
 // snapshot live in the store; only fixtures and skill-generated output files are
 // read from the on-disk work-dir tree under .papi/skills/<skill>/runs/<ts>/.

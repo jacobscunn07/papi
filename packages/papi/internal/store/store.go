@@ -1,5 +1,5 @@
 // Package store is the SQLite persistence layer for the research loop. It owns the
-// single database at .papi/papi.db and is the source of truth for all run history:
+// single database at .papi/db/papi.db and is the source of truth for all run history:
 // runs, iterations, per-scenario results, eval rows, and the live log stream.
 //
 // Only fixtures and skill-generated output files stay on the filesystem (under the
@@ -34,7 +34,7 @@ type Store struct {
 
 // DBPath returns the on-disk location of the database for a repo root.
 func DBPath(repoRoot string) string {
-	return filepath.Join(repoRoot, ".papi", "papi.db")
+	return filepath.Join(repoRoot, ".papi", "db", "papi.db")
 }
 
 // Open opens (creating if needed) the database under repoRoot/.papi and applies
