@@ -16,12 +16,39 @@ license: MIT
 - Never truncate. No `// ...`, no "the rest would go here", no prose describing code where the code belongs.
 - If you write tests, **run them** (`go test ./...`) and paste the actual output. Do not claim "tests pass" without showing it.
 
+## GOFMT IS THE #1 FAILURE MODE — READ THIS TWICE
+
+`gofmt` is not a style suggestion, it is a syntactic requirement of every file you emit, **including every `_test.go` file**. The evaluator parses each `.go` file — production code AND tests — through `go/format`. If a single test file has spaces where a tab belongs, or an extra blank line, or a misaligned struct literal, the whole scenario is docked.
+
+**Mandatory pre-send procedure for every Go file (test files included):**
+
+1. Indentation is **hard tabs**, one tab per level. Never spaces. Not in `main.go`, not in `foo_test.go`, not in table literals, not in struct fields. If your editor/model tends to emit spaces, do a mental find-and-replace before writing.
+2. Imports go in ONE `import (...)` block. Blank line separates groups: stdlib, then third-party, then local module. Alphabetized within each group.
+3. Struct literal fields align on a single tab column. Table-driven test cases use the same width per column:
+   ```go
+   tests := []struct {
+   	name string
+   	in   []int
+   	want int
+   }{
+   	{"empty", nil, 0},
+   	{"a few", []int{1, 2, 3}, 6},
+   }
+   ```
+   Note the tab before every field and every case row.
+4. Exactly ONE blank line between top-level declarations. No trailing whitespace. File ends with a single newline.
+5. `if err != nil {` on the same line as the call when possible; opening brace never on its own line.
+6. Run the whole file through `gofmt` in your head: would `gofmt -l file.go` print the filename? If yes, fix before emitting.
+7. When you have shell access, actually run `gofmt -w .` and `go vet ./...` after writing, and paste the (empty) output as proof.
+
+**This applies equally to test files.** A frequent failure is a perfectly-formatted `main.go` next to a `main_test.go` that used spaces. Both must be tab-indented and gofmt-clean.
+
 ## THE NON-NEGOTIABLE RULES
 
-Apply ALL of these to EVERY Go file you emit.
+Apply ALL of these to EVERY Go file you emit — production and test files alike.
 
-### RULE 1: gofmt-clean, always
-Format exactly as `gofmt` would: tab indentation, one import block sorted into stdlib / third-party groups, aligned struct fields, a single blank line between top-level declarations, no trailing whitespace. If you would not pass `gofmt -l`, fix it before emitting.
+### RULE 1: gofmt-clean, always (production AND tests)
+Format exactly as `gofmt` would: tab indentation, one import block sorted into stdlib / third-party groups, aligned struct fields, a single blank line between top-level declarations, no trailing whitespace. If you would not pass `gofmt -l`, fix it before emitting. **Test files are held to the identical standard.**
 
 ```go
 package main
@@ -63,10 +90,16 @@ func main() {
 ### RULE 4: Prefer the standard library
 Reach for `fmt`, `errors`, `os`, `io`, `bufio`, `strings`, `strconv`, `net/http`, `encoding/json`, `context`, `testing` before any third-party dependency. Only add a module dependency when the stdlib genuinely lacks the capability, and say why.
 
-### RULE 5: Tests are table-driven AND run
+### RULE 5: Tests are table-driven, gofmt-clean, AND actually run
 For any non-trivial library function, emit a `_test.go` with a table-driven test using subtests. Use `t.Run`, compare with `reflect.DeepEqual` for composite values, and prefer `t.Fatalf`/`t.Errorf` with clear messages. **Then actually run `go test ./...` and paste the output.** Never assert "all tests pass" without showing the command output.
 
+The test file must itself be gofmt-clean: tabs, aligned struct literals in the table, one import block, no trailing whitespace. Do NOT relax formatting because "it's just a test".
+
 ```go
+package sum
+
+import "testing"
+
 func TestSum(t *testing.T) {
 	tests := []struct {
 		name string
@@ -148,18 +181,20 @@ myapp/
 
 Trigger on "review this Go", "improve", "refactor", "fix", "clean up", "idiomatic?", "what's wrong with". Always emit the **complete rewritten file(s)** as ```go blocks, then a brief change log after the code — never a bullet list in place of code, never `// unchanged`.
 
-Scan against rules 1–8: unchecked errors, non-idiomatic names, spaces-not-tabs, missing tests/test-output, goroutine leaks, needless dependencies, concrete-struct-only designs with no seams, truncated output.
+Scan against rules 1–8: unchecked errors, non-idiomatic names, spaces-not-tabs (in **any** file, tests included), missing tests/test-output, goroutine leaks, needless dependencies, concrete-struct-only designs with no seams, truncated output.
 
 ## SELF-CHECK BEFORE SENDING
 
 | ☐ | Check |
 |---|---|
 | ☐ | Each `.go` file written to disk with the Write tool AND shown as a fenced ```go block |
-| ☐ | Code compiles (`go build`) and is `gofmt`-clean (tabs, grouped imports, no unused names) |
+| ☐ | **Every** file (production AND `_test.go`) uses hard tabs for indentation — no spaces anywhere |
+| ☐ | Every file is gofmt-clean: one grouped import block, aligned struct fields, no trailing whitespace, file ends with single newline |
+| ☐ | Code compiles (`go build ./...`) — no unused imports or variables |
 | ☐ | Every `error` is checked and wrapped with context; `main` exits non-zero on failure |
 | ☐ | Names are `MixedCaps`/`mixedCaps`, packages short and lowercase; exported surface is minimal |
 | ☐ | Standard library preferred; any third-party dependency is justified |
 | ☐ | At least one small interface or embedded type creates a seam for swappable dependencies |
-| ☐ | Non-trivial logic has a table-driven `_test.go`, and `go test` output is shown |
+| ☐ | Non-trivial logic has a table-driven `_test.go` (also gofmt-clean), and `go test` output is shown |
 | ☐ | Concurrency uses `context`, has no leaks, and is race-clean |
 | ☐ | Files are complete — no truncation, no prose substituting for code |
