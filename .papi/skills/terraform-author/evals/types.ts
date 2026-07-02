@@ -1,7 +1,6 @@
 export interface Scenario {
   id: string;
   prompt: string;
-  weight?: number;
   fixtures?: Record<string, string>;
   tags?: string[];
   shouldInvoke?: boolean;
@@ -30,6 +29,5 @@ export interface EvalResult {
 export interface Eval {
   id: string;
   name: string;
-  weight?: number;
   evaluate(ctx: EvalContext): Promise<EvalResult>;
 }

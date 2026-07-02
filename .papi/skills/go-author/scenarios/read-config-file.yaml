@@ -1,0 +1,7 @@
+id: read-config-file
+prompt: |
+  Write a Go function that reads a JSON configuration file from a given path and
+  returns a populated config struct. It should behave sensibly when the file is
+  missing or contains malformed JSON. Save the code to config.go in the current
+  directory.
+tags: [errors, files]

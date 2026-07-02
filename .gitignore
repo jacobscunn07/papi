@@ -8,3 +8,4 @@ research/runs/
 research/skills/**/runs
 .papi/skills/**/runs
 .papi/skills/**/lock
+.papi/db/

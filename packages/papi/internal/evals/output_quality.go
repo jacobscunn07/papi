@@ -16,10 +16,9 @@ type outputQualityEval struct{}
 
 func NewOutputQualityEval() types.Eval { return &outputQualityEval{} }
 
-func (e *outputQualityEval) ID() string        { return "output-quality" }
-func (e *outputQualityEval) Name() string      { return "Output Quality" }
-func (e *outputQualityEval) Weight() float64   { return 1.0 }
-func (e *outputQualityEval) IsLLMJudge() bool  { return true }
+func (e *outputQualityEval) ID() string       { return "output-quality" }
+func (e *outputQualityEval) Name() string     { return "Output Quality" }
+func (e *outputQualityEval) IsLLMJudge() bool { return true }
 
 func (e *outputQualityEval) Evaluate(ctx types.EvalContext) (types.EvalResult, error) {
 	if !ctx.Invoked || ctx.QualityTranscript == "" {

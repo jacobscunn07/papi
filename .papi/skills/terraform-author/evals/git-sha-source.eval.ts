@@ -11,7 +11,6 @@ const REGISTRY_SOURCE = /source\s*=\s*"[^"]*registry\.terraform\.io/;
 const gitShaSourceEval: Eval = {
   id: 'git-sha-source',
   name: 'Module source: git SHA only',
-  weight: 1.0,
 
   async evaluate(ctx: EvalContext): Promise<EvalResult> {
     if (!ctx.invoked || !ctx.qualityTranscript) {

@@ -11,7 +11,6 @@ const EVAL_NAME = 'Terraform fmt and validate';
 const terraformValidEval: Eval = {
   id: EVAL_ID,
   name: EVAL_NAME,
-  weight: 1.5,
 
   async evaluate(ctx: EvalContext): Promise<EvalResult> {
     if (!ctx.invoked || !ctx.qualityTranscript) {

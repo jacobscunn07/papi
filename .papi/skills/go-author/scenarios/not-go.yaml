@@ -1,0 +1,5 @@
+id: not-go
+prompt: |
+  How do I center a div in CSS?
+tags: [negative]
+shouldInvoke: false

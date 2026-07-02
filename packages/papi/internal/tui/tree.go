@@ -1,0 +1,334 @@
+package tui
+
+import (
+	"fmt"
+	"strings"
+
+	"papi/internal/progress"
+	"papi/internal/runs"
+	"papi/internal/types"
+)
+
+type nodeKind int
+
+const (
+	kindRun nodeKind = iota
+	kindIteration
+	kindScenario
+	kindGroup
+	kindEval
+	kindFile
+)
+
+type row struct {
+	key        string
+	depth      int
+	kind       nodeKind
+	name       string
+	score      float64 // -1 = none
+	badge      string
+	expandable bool
+	expanded   bool
+	live       bool
+	running    bool // actively running right now (has a live-status entry) — drives the spinner
+
+	// verdict for iteration rows: whether this mutation survived selection.
+	kept     bool
+	reverted bool
+
+	groupID string
+
+	run      *runs.Run
+	iter     *runs.Iteration
+	prevIter *runs.Iteration
+	scen     *runs.Scenario
+	eval     *types.EvalResult
+	file     *runs.File
+}
+
+func runKey(ts string) string           { return "r:" + ts }
+func iterKey(rk string, idx int) string { return fmt.Sprintf("%s/i:%d", rk, idx) }
+func scenKey(ik, id string) string      { return ik + "/s:" + id }
+func groupKey(sk, id string) string     { return sk + "/g:" + id }
+func evalKey(sk, id string) string      { return sk + "/e:" + id }
+func fileKey(sk, label string) string   { return sk + "/f:" + label }
+
+// buildRows flattens the visible tree given the current expansion state. The live
+// run (if any) is listed first, then past runs newest-first.
+func (m *model) buildRows() []row {
+	var rows []row
+
+	emitRun := func(r *runs.Run, live bool) {
+		rk := runKey(r.Timestamp)
+		expanded := m.expanded[rk]
+		badge := ""
+		if live {
+			badge = m.liveStatus[rk]
+		} else if d := r.Duration(); d > 0 {
+			badge = progress.FmtDuration(d)
+		}
+		if !live && r.Resumable() {
+			if badge != "" {
+				badge += "  "
+			}
+			badge += "⏸ resumable"
+		}
+		rows = append(rows, row{
+			key: rk, depth: 0, kind: kindRun,
+			name:       "run " + r.Timestamp,
+			score:      r.BestScore(),
+			badge:      badge,
+			expandable: len(r.Iterations) > 0,
+			expanded:   expanded,
+			live:       live,
+			run:        r,
+		})
+		if !expanded {
+			return
+		}
+		// Track the running best so each iteration can be marked kept (it improved
+		// on the best and was committed) or reverted (it didn't, so SKILL.md rolled
+		// back). The baseline (iter 0) is the starting point and gets no verdict.
+		best := -1.0
+		for idx := range r.Iterations {
+			it := &r.Iterations[idx]
+			var prev *runs.Iteration
+			if idx > 0 {
+				prev = &r.Iterations[idx-1]
+			}
+			kept, reverted := false, false
+			if idx > 0 && it.Score >= 0 {
+				if it.Score > best {
+					kept = true
+				} else {
+					reverted = true
+				}
+			}
+			if it.Score >= 0 && it.Score > best {
+				best = it.Score
+			}
+			m.emitIteration(&rows, rk, r, it, prev, live, kept, reverted)
+		}
+	}
+
+	if m.live != nil {
+		emitRun(m.live, true)
+	}
+	for i := len(m.pastRuns) - 1; i >= 0; i-- {
+		emitRun(&m.pastRuns[i], false)
+	}
+	return rows
+}
+
+func (m *model) emitIteration(rows *[]row, rk string, r *runs.Run, it *runs.Iteration, prev *runs.Iteration, live, kept, reverted bool) {
+	ik := iterKey(rk, it.Index)
+	expanded := m.expanded[ik]
+	name := fmt.Sprintf("iteration-%03d", it.Index)
+	if it.Index == 0 {
+		name += " (baseline)"
+	}
+	badge := m.liveStatus[ik]
+	if badge == "" {
+		if prev != nil && it.Score >= 0 && prev.Score >= 0 {
+			delta := (it.Score - prev.Score) * 100
+			sign := "+"
+			if delta < 0 {
+				sign = ""
+			}
+			badge = fmt.Sprintf("Δ%s%.1f", sign, delta)
+		}
+		if it.DurationMs > 0 {
+			if badge != "" {
+				badge += "  "
+			}
+			badge += progress.FmtDuration(it.DurationMs)
+		}
+	}
+	*rows = append(*rows, row{
+		key: ik, depth: 1, kind: kindIteration,
+		name:       name,
+		score:      it.Score,
+		badge:      badge,
+		expandable: len(it.Scenarios) > 0,
+		expanded:   expanded,
+		live:       live,
+		running:    m.liveStatus[ik] != "",
+		kept:       kept,
+		reverted:   reverted,
+		iter:       it,
+		prevIter:   prev,
+		run:        r,
+	})
+	if !expanded {
+		return
+	}
+	for si := range it.Scenarios {
+		sc := &it.Scenarios[si]
+		m.emitScenario(rows, ik, sc, live)
+	}
+}
+
+func (m *model) emitScenario(rows *[]row, ik string, sc *runs.Scenario, live bool) {
+	sk := scenKey(ik, sc.ID)
+	expanded := m.expanded[sk]
+	badge := m.liveStatus[sk]
+	if badge == "" {
+		if sc.Score >= 0 && !sc.Invoked {
+			badge = "not invoked"
+		}
+	}
+	*rows = append(*rows, row{
+		key: sk, depth: 2, kind: kindScenario,
+		name:       sc.ID,
+		score:      sc.Score,
+		badge:      badge,
+		expandable: len(sc.Transcripts)+len(sc.Files)+len(sc.Result.EvalResults) > 0,
+		expanded:   expanded,
+		live:       live,
+		running:    m.liveStatus[sk] != "",
+		scen:       sc,
+	})
+	if !expanded {
+		return
+	}
+
+	// Children are grouped under collapsible section headers (Evals, Transcripts,
+	// Files) so the categories are distinguishable. Each group is emitted only when
+	// it has items, and its children appear (one indent deeper) only when expanded.
+	emitGroup := func(id, name string, count int, emitChildren func(gk string)) {
+		if count == 0 {
+			return
+		}
+		gk := groupKey(sk, id)
+		gExpanded := m.expanded[gk]
+		*rows = append(*rows, row{
+			key: gk, depth: 3, kind: kindGroup,
+			name:       name,
+			score:      -1,
+			badge:      fmt.Sprintf("%d", count),
+			expandable: true,
+			expanded:   gExpanded,
+			groupID:    id,
+			scen:       sc,
+		})
+		if gExpanded {
+			emitChildren(gk)
+		}
+	}
+
+	emitGroup("evals", "Evals", len(sc.Result.EvalResults), func(gk string) {
+		for ei := range sc.Result.EvalResults {
+			ev := &sc.Result.EvalResults[ei]
+			flags := ""
+			if ev.Required {
+				flags += " [req]"
+			}
+			if ev.IsLLMJudge {
+				flags += " [llm]"
+			}
+			*rows = append(*rows, row{
+				key: evalKey(gk, ev.EvalID), depth: 4, kind: kindEval,
+				name: ev.Name, score: ev.Score, badge: flags, eval: ev, scen: sc,
+			})
+		}
+	})
+
+	emitGroup("transcripts", "Transcripts", len(sc.Transcripts), func(gk string) {
+		for ti := range sc.Transcripts {
+			f := &sc.Transcripts[ti]
+			*rows = append(*rows, row{
+				key: fileKey(gk, f.Label), depth: 4, kind: kindFile,
+				name: f.Label, score: -1, file: f, scen: sc,
+			})
+		}
+	})
+
+	emitGroup("files", "Files", len(sc.Files), func(gk string) {
+		for fi := range sc.Files {
+			f := &sc.Files[fi]
+			*rows = append(*rows, row{
+				key: fileKey(gk, f.Label), depth: 4, kind: kindFile,
+				name: "≣ " + f.Label, score: -1, file: f, scen: sc,
+			})
+		}
+	})
+}
+
+// renderRow renders a single tree row to a string of the given width. spin is the
+// current spinner frame, prefixed to the badge of actively-running rows.
+func renderRow(r row, selected bool, width int, spin string) string {
+	indent := strings.Repeat("  ", r.depth)
+	arrow := "  "
+	if r.expandable {
+		if r.expanded {
+			arrow = "▾ "
+		} else {
+			arrow = "▸ "
+		}
+	}
+
+	// Verdict glyph: did this mutation survive selection?
+	verdict := ""
+	switch {
+	case r.kept:
+		verdict = "✓ "
+	case r.reverted:
+		verdict = "↩ "
+	}
+
+	scorePart := ""
+	if r.score >= 0 {
+		scorePart = fmt.Sprintf("  %.1f", r.score*100)
+	}
+	badge := r.badge
+	switch {
+	case r.live && r.kind == kindRun:
+		if badge == "done" {
+			badge = "✓ done"
+		} else {
+			badge = "● " + badge
+		}
+	case r.running && badge != "":
+		badge = spin + " " + badge // animate only the actively-running node
+	}
+
+	plain := indent + arrow + verdict + r.name + scorePart
+	if badge != "" {
+		plain += "  " + badge
+	}
+	if len(plain) > width && width > 1 {
+		plain = plain[:width-1] + "…"
+	}
+
+	if selected {
+		if len(plain) < width {
+			plain += strings.Repeat(" ", width-len(plain))
+		}
+		return selectedRowStyle.Render(plain)
+	}
+
+	// Non-selected: colorize verdict, name, score, and badge.
+	line := mutedStyle.Render(indent + arrow)
+	switch {
+	case r.kept:
+		line += scoreStyle(r.score).Render(verdict)
+	case r.reverted:
+		line += mutedStyle.Render(verdict)
+	}
+	if r.reverted {
+		line += mutedStyle.Render(r.name) // ghost rung
+	} else {
+		line += r.name
+	}
+	if scorePart != "" {
+		line += scoreStyle(r.score).Render(scorePart)
+	}
+	if badge != "" {
+		bs := mutedStyle
+		if r.live {
+			bs = liveBadgeStyle
+		}
+		line += "  " + bs.Render(badge)
+	}
+	return line
+}

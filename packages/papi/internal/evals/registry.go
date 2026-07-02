@@ -1,8 +1,6 @@
 package evals
 
 import (
-	"fmt"
-
 	"papi/internal/types"
 )
 
@@ -14,21 +12,5 @@ func NewRegistry(customEvalsDir string) []types.Eval {
 		NewOutputQualityEval(),
 	}
 	evalList = append(evalList, discoverEvals(customEvalsDir)...)
-	ids := make([]string, len(evalList))
-	for i, e := range evalList {
-		ids[i] = e.ID()
-	}
-	fmt.Printf("Loaded evals: %s\n", joinStrings(ids, ", "))
 	return evalList
-}
-
-func joinStrings(ss []string, sep string) string {
-	result := ""
-	for i, s := range ss {
-		if i > 0 {
-			result += sep
-		}
-		result += s
-	}
-	return result
 }

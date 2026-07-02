@@ -4,3 +4,7 @@ max-runs: 5
 scenario-model: claude-haiku-4-5-20251001
 quality-model: claude-sonnet-4-6
 research-model: claude-opus-4-7
+
+# Category weights for scoring (percentages; must sum to 100).
+llm-weight: 30   # weight for LLM-judge evals     (default 30)
+weight: 70       # weight for non-LLM-judge evals (default 70)

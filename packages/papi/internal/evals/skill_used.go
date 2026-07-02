@@ -10,10 +10,9 @@ type skillUsedEval struct{}
 
 func NewSkillUsedEval() types.Eval { return &skillUsedEval{} }
 
-func (e *skillUsedEval) ID() string         { return "skill-used" }
-func (e *skillUsedEval) Name() string       { return "Skill Was Invoked" }
-func (e *skillUsedEval) Weight() float64    { return 2.0 }
-func (e *skillUsedEval) IsLLMJudge() bool   { return false }
+func (e *skillUsedEval) ID() string        { return "skill-used" }
+func (e *skillUsedEval) Name() string      { return "Skill Was Invoked" }
+func (e *skillUsedEval) IsLLMJudge() bool  { return false }
 
 func (e *skillUsedEval) Evaluate(ctx types.EvalContext) (types.EvalResult, error) {
 	shouldInvoke := ctx.Scenario.ShouldInvoke == nil || *ctx.Scenario.ShouldInvoke

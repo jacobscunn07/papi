@@ -1,13 +1,16 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
+	"papi/internal/appconfig"
 	"papi/internal/loop"
-	"papi/internal/types"
+	"papi/internal/progress"
+	"papi/internal/store"
+	"papi/internal/tui"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -16,6 +19,14 @@ import (
 var papiCmd = &cobra.Command{
 	Use:   "papi",
 	Short: "Autoresearch loop for self-improving Claude skills",
+	// With no subcommand, launch the interactive TUI.
+	RunE: func(cmd *cobra.Command, args []string) error {
+		repoRoot, err := appconfig.Resolve()
+		if err != nil {
+			return err
+		}
+		return tui.Run(repoRoot)
+	},
 }
 
 var runCmd = &cobra.Command{
@@ -23,46 +34,24 @@ var runCmd = &cobra.Command{
 	Short: "Run the autoresearch loop for a skill",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		viper.SetConfigFile(filepath.Join(viper.GetString("repo-root"), ".papi", "config"))
-		viper.SetConfigType("yaml")
-		if err := viper.ReadInConfig(); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("read .papi/config: %w", err)
-		}
-
-		repoRoot, err := filepath.Abs(viper.GetString("repo-root"))
+		repoRoot, err := appconfig.Resolve()
 		if err != nil {
-			return fmt.Errorf("resolve repo-root: %w", err)
+			return err
 		}
 
-		skillName := args[0]
-		tagsRaw := viper.GetString("tags")
-		var tags []string
-		if tagsRaw != "" {
-			for _, t := range strings.Split(tagsRaw, ",") {
-				if trimmed := strings.TrimSpace(t); trimmed != "" {
-					tags = append(tags, trimmed)
-				}
-			}
+		cfg, err := appconfig.Build(repoRoot, args[0])
+		if err != nil {
+			return err
 		}
 
-		cfg := &types.ResearchConfig{
-			SkillName:      skillName,
-			SkillDir:       filepath.Join(repoRoot, "skills", skillName),
-			ScenariosDir:   filepath.Join(repoRoot, ".papi", "skills", skillName, "scenarios"),
-			CustomEvalsDir: filepath.Join(repoRoot, ".papi", "skills", skillName, "evals"),
-			MaxIterations:  viper.GetInt("iterations"),
-			MaxBudgetUSD:   viper.GetFloat64("budget"),
-			Tags:           tags,
-			DryRun:         viper.GetBool("dry-run"),
-			ScenarioModel:  viper.GetString("scenario-model"),
-			QualityModel:   viper.GetString("quality-model"),
-			ResearchModel:  viper.GetString("research-model"),
-			MaxRuns:           viper.GetInt("max-runs"),
-			LLMJudgeWeight:    viper.GetFloat64("llm-weight"),
-			NonLLMJudgeWeight: viper.GetFloat64("non-llm-weight"),
+		st, err := store.Open(repoRoot)
+		if err != nil {
+			return err
 		}
+		defer st.Close()
 
-		return loop.Run(cfg, repoRoot)
+		rep := progress.NewCLIReporter(cfg.MaxIterations, cfg.LLMJudgeWeight, cfg.NonLLMJudgeWeight)
+		return loop.Run(context.Background(), cfg, repoRoot, st, rep, false)
 	},
 }
 
@@ -73,13 +62,14 @@ func init() {
 	flags.Float64("budget", 5.0, "Max spend in USD")
 	flags.String("tags", "", "Filter scenarios by comma-separated tags")
 	flags.Bool("dry-run", false, "Run evals without modifying SKILL.md or committing")
+	flags.Bool("resume", false, "Resume the latest unfinished run for this skill instead of starting fresh")
 	flags.String("scenario-model", "claude-haiku-4-5-20251001", "Model for invocation check (description-only)")
 	flags.String("quality-model", "claude-sonnet-4-6", "Model for quality check (full skill execution)")
 	flags.String("research-model", "claude-opus-4-7", "Model for research agent")
 	flags.String("repo-root", ".", "Repository root (defaults to current directory)")
 	flags.Int("max-runs", 3, "Max runs to retain per skill (0 = keep all)")
-	flags.Float64("llm-weight", 0.3, "Category weight for LLM judge evals (0–1)")
-	flags.Float64("non-llm-weight", 0.7, "Category weight for non-LLM judge evals (0–1)")
+	flags.Int("llm-weight", 30, "Category weight % for LLM judge evals (default 30)")
+	flags.Int("weight", 70, "Category weight % for non-LLM judge evals (default 70; with llm-weight must sum to 100)")
 
 	// Bind all flags to viper so env vars and config files also work.
 	// Env var convention: RESEARCH_BUDGET, RESEARCH_ITERATIONS, etc.

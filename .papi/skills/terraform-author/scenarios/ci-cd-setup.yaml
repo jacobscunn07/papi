@@ -2,7 +2,6 @@ id: ci-cd-setup
 prompt: |
   Set up automated validation for our Terraform repositories. We use GitHub
   Actions and want to catch issues before they reach production.
-weight: 1.0
 tags: [ci-cd]
 fixtures:
   main.tf: |

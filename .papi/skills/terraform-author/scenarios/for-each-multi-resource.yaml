@@ -3,5 +3,4 @@ prompt: |
   Write Terraform code to create S3 buckets for four teams: platform, data,
   frontend, and mobile. Each bucket needs versioning enabled. Use the most
   maintainable approach.
-weight: 1.5
 tags: [for-each, modules]

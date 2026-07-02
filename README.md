@@ -48,7 +48,7 @@ Each iteration:
 2. Each scenario runs through a **two-phase test**:
    - **Invocation check (description test)**: Claude sees only the skill name and `description` frontmatter field and must decide whether to invoke `/skill-name` — no body content shown. This tests the description in isolation.
    - **Quality check**: Full skill loaded via `--plugin-dir`; evals score output quality
-3. Score = weighted average across scenarios. Failing the invocation check scores 0 for that scenario.
+3. Score = average across scenarios. Failing the invocation check scores 0 for that scenario.
 4. If new score beats the best so far → `git commit`. Otherwise → revert `SKILL.md`.
 
 The `description` field is the primary optimization target — it determines whether Claude naturally reaches for the skill without being told to.

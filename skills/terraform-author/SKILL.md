@@ -1,6 +1,6 @@
 ---
 name: terraform-author
-description: Use when writing, reviewing, improving, refactoring, fixing, cleaning up, or architecting Terraform/OpenTofu/HCL code — modules, AWS resources (VPC, S3, EKS, RDS, IAM, Lambda, DynamoDB, ALB, KMS), state backends, naming conventions, conditional creation, for_each vs count, module sourcing/pinning, Terratest/tftest.hcl testing, and CI/CD (tflint, tfsec, Checkov, GitHub Actions). Always emits complete HCL files using terraform-aws-modules wrappers with commit-SHA pinning.
+description: Use when writing, reviewing, auditing, refactoring, modernizing, fixing, or architecting Terraform / OpenTofu / HCL — including modules, AWS resources (VPC, S3, EKS, RDS, IAM, Lambda, DynamoDB, ALB, KMS, SNS, SQS, CloudFront, ACM, API Gateway, ElastiCache), iterating over multiple similar resources with for_each / count / dynamic blocks, conditional creation, module sourcing and SHA pinning, naming conventions, state backends, Terratest / tftest.hcl, and CI/CD (tflint, tfsec, Checkov, GitHub Actions). Trigger on ANY mention of .tf, HCL, hashicorp, terraform-aws-modules, `resource "aws_*"`, `module {}`, `for_each`, iterating/looping over resources, or requests to write/review/improve/refactor/audit/fix Terraform.
 version: 0.1.0
 license: MIT
 ---
@@ -31,8 +31,9 @@ Default file set for any module task: `variables.tf`, `main.tf`, `outputs.tf` �
 |---|---|
 | "Write a module for X" | Full `variables.tf` + `main.tf` + `outputs.tf` as 3 separate ```hcl blocks |
 | "Create VPC / S3 / EKS / RDS / Lambda…" | Full `variables.tf` + `main.tf` + `outputs.tf` |
-| "Show me for_each / conditional creation" | Full `variables.tf` + `main.tf` (showing the pattern in context) |
-| "Review / improve / refactor this code" | The **complete rewritten files** as ```hcl blocks, then a brief change log |
+| "for_each / iterate / loop over multiple…" | Full `variables.tf` + `main.tf` with a `for_each` over a map |
+| "Show me conditional creation" | Full `variables.tf` + `main.tf` (showing the pattern in context) |
+| "Review / improve / refactor / audit / fix / clean up this code" | The **complete rewritten files** as ```hcl blocks, then a brief change log |
 | "How should I structure / architect…" | Recommendation **plus** the `.tf` skeleton implementing it + directory tree |
 | "Set up CI / testing" | Full `.github/workflows/terraform.yml` YAML + sample `.tftest.hcl` |
 | "Remote state / backend" | Full bootstrap `main.tf` + consumer `backend.tf` block |
@@ -46,14 +47,35 @@ If unsure whether to include code: **include it**. Prose without code is a failu
 
 Apply ALL of these to EVERY HCL emission — modules, root configs, reviews, refactors, snippets, tests, CI. No exceptions.
 
-### RULE 1: Use `terraform-aws-modules` — ZERO raw `resource "aws_*"` blocks
+### RULE 1: Use `terraform-aws-modules` — ZERO raw `resource "aws_*"` blocks ANYWHERE in the response
 
-Wrap every AWS resource in a `module` block sourced from `github.com/terraform-aws-modules/*`.
+Wrap every AWS resource in a `module` block sourced from `github.com/terraform-aws-modules/*`. **This includes the companion resources** that often slip in alongside a bucket/VPC/etc. — do NOT add them as raw `resource` blocks; configure them through the module's arguments instead.
+
+**Common leak-through resources that MUST be inside the module, never raw:**
+
+| Don't emit as raw `resource` | Configure inside the module |
+|---|---|
+| `aws_s3_bucket_versioning` | `versioning = { enabled = true }` on the s3-bucket module |
+| `aws_s3_bucket_server_side_encryption_configuration` | `server_side_encryption_configuration = {...}` arg |
+| `aws_s3_bucket_public_access_block` | `block_public_acls`, `block_public_policy`, `ignore_public_acls`, `restrict_public_buckets` args |
+| `aws_s3_bucket_policy` | `attach_policy = true` + `policy = ...` arg |
+| `aws_s3_bucket_lifecycle_configuration` | `lifecycle_rule = [...]` arg |
+| `aws_s3_bucket_logging` | `logging = {...}` arg |
+| `aws_s3_bucket_ownership_controls` | `control_object_ownership` + `object_ownership` args |
+| `aws_vpc`, `aws_subnet`, `aws_route_table`, `aws_nat_gateway`, `aws_internet_gateway`, `aws_eip` | All inside the VPC module |
+| `aws_security_group`, `aws_security_group_rule` | Inside `terraform-aws-security-group` module |
+| `aws_iam_role`, `aws_iam_policy`, `aws_iam_role_policy_attachment` | Inside `terraform-aws-iam` module |
+| `aws_lambda_function`, `aws_lambda_permission` | Inside `terraform-aws-lambda` module |
+| `aws_db_instance`, `aws_db_subnet_group`, `aws_db_parameter_group` | Inside `terraform-aws-rds` module |
+| `aws_dynamodb_table` | Inside `terraform-aws-dynamodb-table` module |
+| `aws_kms_key`, `aws_kms_alias` | Inside `terraform-aws-kms` module |
+
+If the response contains any line matching `resource "aws_` it is a failure — rewrite using the module's arguments.
 
 | AWS Resource | Module Source |
 |---|---|
 | VPC / subnets / NAT / IGW / route tables | `github.com/terraform-aws-modules/terraform-aws-vpc` |
-| S3 bucket (+versioning, encryption, public-access-block, policy) | `github.com/terraform-aws-modules/terraform-aws-s3-bucket` |
+| S3 bucket (+versioning, encryption, public-access-block, policy, lifecycle) | `github.com/terraform-aws-modules/terraform-aws-s3-bucket` |
 | Security group | `github.com/terraform-aws-modules/terraform-aws-security-group` |
 | EC2 / ASG | `github.com/terraform-aws-modules/terraform-aws-autoscaling` |
 | EKS | `github.com/terraform-aws-modules/terraform-aws-eks` |
@@ -71,20 +93,32 @@ Wrap every AWS resource in a `module` block sourced from `github.com/terraform-a
 | ElastiCache | `github.com/terraform-aws-modules/terraform-aws-elasticache` |
 
 ```hcl
-# ❌ FORBIDDEN
+# ❌ FORBIDDEN — raw resources
 resource "aws_vpc" "main" { ... }
 resource "aws_s3_bucket" "data" { ... }
-resource "aws_s3_bucket_versioning" "data" { ... }
+resource "aws_s3_bucket_versioning" "data" { ... }   # ← STILL FORBIDDEN even alongside a module
+resource "aws_s3_bucket_public_access_block" "x" { ... }
 resource "aws_dynamodb_table" "lock" { ... }
 
-# ✅ REQUIRED
+# ✅ REQUIRED — everything configured via the module arguments
 module "s3_bucket" {
-  source = "github.com/terraform-aws-modules/terraform-aws-s3-bucket?ref=a3d9e3b4f2c18e55d3f5b6a781234567890abcde"
+  source = "github.com/terraform-aws-modules/terraform-aws-s3-bucket?ref=fc09cc6fb779b262ce1bee5334e85808a107d8a3"
   bucket = "s3-${var.project}-${var.environment}-${var.region}-${var.identifier}"
+
+  versioning = { enabled = true }
+  server_side_encryption_configuration = {
+    rule = { apply_server_side_encryption_by_default = { sse_algorithm = "aws:kms" } }
+  }
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
 }
 ```
 
 ### RULE 2: Naming pattern — `<type>-<project>-<env>-<region>-<id>`
+
+**Every named resource MUST include ALL FIVE components in this exact order — including the leading `<type>-` prefix AND the trailing `<identifier>` segment.** No exceptions.
 
 | Resource | Prefix | Example |
 |---|---|---|
@@ -102,7 +136,9 @@ module "s3_bucket" {
 ```hcl
 locals {
   name_prefix = "${var.project}-${var.environment}-${var.region}"
+  # ✅ Always: <type>-<prefix>-<identifier>
   bucket_name = "s3-${local.name_prefix}-${var.identifier}"
+  vpc_name    = "vpc-${local.name_prefix}-${var.identifier}"
 }
 ```
 
@@ -122,6 +158,7 @@ S3 specifics: lowercase only, 3–63 chars, globally unique → the project+env+
 ```hcl
 # ✅ Immutable 40-char commit SHA
 source = "github.com/terraform-aws-modules/terraform-aws-vpc?ref=c7da07283dfcc48d77d8e82e2b06879288d7e327"
+source = "github.com/terraform-aws-modules/terraform-aws-s3-bucket?ref=fc09cc6fb779b262ce1bee5334e85808a107d8a3"
 source = "git::ssh://git@github.com/myorg/terraform-modules.git//networking?ref=f3a1c9d8e2b74a0c6d8e9f1234567890abcdef12"
 
 # ❌ Tag — mutable (force-push / retag)
@@ -151,7 +188,7 @@ variable "create_bucket" {
 }
 
 module "s3_bucket" {
-  source = "github.com/terraform-aws-modules/terraform-aws-s3-bucket?ref=a3d9e3b4f2c18e55d3f5b6a781234567890abcde"
+  source = "github.com/terraform-aws-modules/terraform-aws-s3-bucket?ref=fc09cc6fb779b262ce1bee5334e85808a107d8a3"
   count  = var.create && var.create_bucket ? 1 : 0
   bucket = local.bucket_name
 }
@@ -159,7 +196,9 @@ module "s3_bucket" {
 
 This is the **only** legitimate use of `count`.
 
-### RULE 5: `for_each` (never `count`) for multiple similar resources
+### RULE 5: `for_each` (never `count`) for multiple similar resources — INCLUDE A `for_each` EXAMPLE IN EVERY MODULE
+
+Every module template emitted MUST contain at least one `for_each` block (over a map). This keeps the pattern visible and makes the module extensible without index-based churn.
 
 ```hcl
 # ✅ for_each over a map — stable keys, safe under reordering
@@ -170,7 +209,7 @@ variable "buckets" {
 }
 
 module "buckets" {
-  source   = "github.com/terraform-aws-modules/terraform-aws-s3-bucket?ref=a3d9e3b4f2c18e55d3f5b6a781234567890abcde"
+  source   = "github.com/terraform-aws-modules/terraform-aws-s3-bucket?ref=fc09cc6fb779b262ce1bee5334e85808a107d8a3"
   for_each = var.create ? var.buckets : {}
 
   bucket     = "s3-${var.project}-${var.environment}-${var.region}-${each.key}"
@@ -191,11 +230,11 @@ Files under `envs/<env>/`, `services/<name>/`, `live/<account>/<env>/<region>/` 
 
 ### RULE 7: Always emit complete files — never truncate, never describe
 
-Every `.tf`, `.tftest.hcl`, and `.yml` referenced must appear in full as a fenced code block. No `...`, no "would contain", no bullet summaries replacing code.
+Every `.tf`, `.tftest.hcl`, and `.yml` referenced must appear in full as a fenced code block. No `...`, no "would contain", no bullet summaries replacing code. Run `terraform fmt` formatting mentally before emitting — 2-space indent, aligned `=`, no trailing whitespace.
 
 ---
 
-## CANONICAL MODULE TEMPLATE — copy and adapt
+## CANONICAL MODULE TEMPLATE — copy and adapt (includes BOTH `count` kill-switch AND `for_each` map)
 
 ### `variables.tf`
 
@@ -244,7 +283,7 @@ variable "identifier" {
 }
 
 variable "extra_buckets" {
-  description = "Map of additional buckets keyed by identifier."
+  description = "Map of additional buckets keyed by identifier — iterated via for_each."
   type        = map(object({ versioning_enabled = bool }))
   default     = {}
 }
@@ -272,7 +311,7 @@ locals {
 }
 
 module "s3_bucket" {
-  source = "github.com/terraform-aws-modules/terraform-aws-s3-bucket?ref=a3d9e3b4f2c18e55d3f5b6a781234567890abcde"
+  source = "github.com/terraform-aws-modules/terraform-aws-s3-bucket?ref=fc09cc6fb779b262ce1bee5334e85808a107d8a3"
   count  = var.create && var.create_bucket ? 1 : 0
 
   bucket = local.bucket_name
@@ -294,8 +333,9 @@ module "s3_bucket" {
   tags = local.common_tags
 }
 
+# for_each over a map — stable keys; extra buckets created per identifier
 module "extra_buckets" {
-  source   = "github.com/terraform-aws-modules/terraform-aws-s3-bucket?ref=a3d9e3b4f2c18e55d3f5b6a781234567890abcde"
+  source   = "github.com/terraform-aws-modules/terraform-aws-s3-bucket?ref=fc09cc6fb779b262ce1bee5334e85808a107d8a3"
   for_each = var.create ? var.extra_buckets : {}
 
   bucket     = "s3-${local.name_prefix}-${each.key}"
@@ -337,20 +377,32 @@ variable "create_vpc" { type = bool, default = true, description = "Whether to c
 variable "project"     { type = string, description = "Project name." }
 variable "environment" { type = string, description = "Environment." }
 variable "region"      { type = string, description = "AWS region." }
+variable "identifier"  { type = string, default = "main", description = "Distinguishing label." }
 
 variable "vpc_cidr"             { type = string, default = "10.0.0.0/16" }
 variable "public_subnet_cidrs"  { type = list(string), default = ["10.0.0.0/24",  "10.0.1.0/24",  "10.0.2.0/24"] }
 variable "private_subnet_cidrs" { type = list(string), default = ["10.0.10.0/24", "10.0.11.0/24", "10.0.12.0/24"] }
+
+variable "extra_vpcs" {
+  description = "Optional additional VPCs keyed by identifier — iterated via for_each."
+  type        = map(object({ cidr = string }))
+  default     = {}
+}
 ```
 
 ### `main.tf`
 
 ```hcl
+locals {
+  name_prefix = "${var.project}-${var.environment}-${var.region}"
+  vpc_name    = "vpc-${local.name_prefix}-${var.identifier}"
+}
+
 module "vpc" {
   source = "github.com/terraform-aws-modules/terraform-aws-vpc?ref=c7da07283dfcc48d77d8e82e2b06879288d7e327"
   count  = var.create && var.create_vpc ? 1 : 0
 
-  name = "vpc-${var.project}-${var.environment}-${var.region}-main"
+  name = local.vpc_name
   cidr = var.vpc_cidr
 
   azs             = ["${var.region}a", "${var.region}b", "${var.region}c"]
@@ -372,15 +424,25 @@ module "vpc" {
     Region      = var.region
   }
 }
+
+module "extra_vpcs" {
+  source   = "github.com/terraform-aws-modules/terraform-aws-vpc?ref=c7da07283dfcc48d77d8e82e2b06879288d7e327"
+  for_each = var.create ? var.extra_vpcs : {}
+
+  name = "vpc-${local.name_prefix}-${each.key}"
+  cidr = each.value.cidr
+  azs  = ["${var.region}a", "${var.region}b", "${var.region}c"]
+}
 ```
 
 ### `outputs.tf`
 
 ```hcl
-output "vpc_id"             { value = var.create && var.create_vpc ? module.vpc[0].vpc_id             : null }
-output "public_subnet_ids"  { value = var.create && var.create_vpc ? module.vpc[0].public_subnets     : []   }
-output "private_subnet_ids" { value = var.create && var.create_vpc ? module.vpc[0].private_subnets    : []   }
-output "nat_gateway_ids"    { value = var.create && var.create_vpc ? module.vpc[0].natgw_ids          : []   }
+output "vpc_id"             { value = var.create && var.create_vpc ? module.vpc[0].vpc_id          : null }
+output "public_subnet_ids"  { value = var.create && var.create_vpc ? module.vpc[0].public_subnets  : []   }
+output "private_subnet_ids" { value = var.create && var.create_vpc ? module.vpc[0].private_subnets : []   }
+output "nat_gateway_ids"    { value = var.create && var.create_vpc ? module.vpc[0].natgw_ids       : []   }
+output "extra_vpc_ids"      { value = { for k, m in module.extra_vpcs : k => m.vpc_id } }
 ```
 
 ---
@@ -390,7 +452,7 @@ output "nat_gateway_ids"    { value = var.create && var.create_vpc ? module.vpc[
 ```hcl
 # bootstrap/main.tf
 module "tfstate_bucket" {
-  source = "github.com/terraform-aws-modules/terraform-aws-s3-bucket?ref=a3d9e3b4f2c18e55d3f5b6a781234567890abcde"
+  source = "github.com/terraform-aws-modules/terraform-aws-s3-bucket?ref=fc09cc6fb779b262ce1bee5334e85808a107d8a3"
 
   bucket = "s3-${var.project}-${var.environment}-${var.region}-tfstate"
 
@@ -440,6 +502,7 @@ module "networking" {
   project     = var.project
   environment = var.environment
   region      = var.region
+  identifier  = var.identifier
 
   create     = var.create
   create_vpc = true
@@ -496,7 +559,7 @@ data "terraform_remote_state" "networking" {
 |---|---|---|
 | Format | `terraform fmt -check -recursive` | Pre-commit |
 | Lint | `tflint --recursive` | Pre-commit |
-| Validate | `terraform validate` | Pre-commit |
+| Validate | `terraform init -backend=false && terraform validate` | Pre-commit |
 | Unit | `*.tftest.hcl` (Terraform ≥1.6 native `terraform test`) | PR |
 | Integration | Terratest (Go) on ephemeral AWS account | Merge to main |
 | Security | `checkov -d .` + `tfsec .` | CI |
@@ -530,7 +593,7 @@ run "create_false_creates_nothing" {
 }
 ```
 
-Rollout order: fmt → validate → tflint → tftest → checkov/tfsec → Terratest.
+Rollout order: fmt → init → validate → tflint → tftest → checkov/tfsec → Terratest.
 
 ---
 
@@ -556,7 +619,7 @@ jobs:
       - name: fmt
         run: terraform fmt -check -recursive
 
-      - name: init (no backend)
+      - name: init (no backend, fetches modules)
         run: terraform init -backend=false
 
       - name: validate
@@ -599,9 +662,9 @@ jobs:
 
 ---
 
-## REVIEW / REFACTOR / IMPROVE PROTOCOL
+## REVIEW / REFACTOR / IMPROVE / AUDIT / FIX / CLEAN-UP PROTOCOL
 
-When given existing Terraform to review, improve, refactor, fix, clean up, or audit:
+TRIGGER on ANY phrasing like: "review this terraform", "improve this module", "refactor", "audit", "critique", "fix", "clean up", "modernize", "what's wrong with", "can this be better". Always emit the full rewritten files.
 
 1. Scan against rules 1–7.
 2. **Rewrite the complete files** as ```hcl blocks — never a bullet list of changes, never `// rest unchanged`.
@@ -611,8 +674,8 @@ Rubric:
 
 | # | Check | Fix |
 |---|---|---|
-| 1 | Any `resource "aws_*"` blocks? | Replace with `module` from terraform-aws-modules table |
-| 2 | Names not in `<type>-<project>-<env>-<region>-<id>` form? | Rewrite via `locals` from required vars |
+| 1 | Any `resource "aws_*"` blocks (including `aws_s3_bucket_versioning`, `aws_s3_bucket_public_access_block`, `aws_s3_bucket_policy`, `aws_security_group_rule`, etc.)? | Move config into the module's arguments — never alongside as a raw resource |
+| 2 | Names not in `<type>-<project>-<env>-<region>-<id>` form (including the leading type prefix)? | Rewrite via `locals` from required vars (`s3-`, `vpc-`, `eks-` prefix + `${var.identifier}` suffix) |
 | 3 | `?ref=` is a tag, branch, or missing? | Replace with 40-char commit SHA |
 | 4 | No `create` / `create_<resource>` vars? | Add them; gate every module with `count = var.create && var.create_<r> ? 1 : 0` |
 | 5 | `count` used with a list/length? | Convert to `for_each` over a map |
@@ -627,11 +690,12 @@ Rubric:
 |---|---|
 | ☐ | Response contains complete ```hcl blocks for every file mentioned or implied (default: variables.tf + main.tf + outputs.tf) |
 | ☐ | No prose substitutes for code ("the file would contain", "you would define", bullet lists describing fields) |
-| ☐ | Zero `resource "aws_*"` — all AWS resources go through terraform-aws-modules |
-| ☐ | All names follow `<type>-<project>-<env>-<region>-<id>` built from `var.project`, `var.environment`, `var.region`, `var.identifier` |
+| ☐ | **Grep mentally for `resource "aws_` — there must be ZERO matches.** All AWS resources (including versioning, encryption, public-access-block, bucket policy, lifecycle, SG rules, IAM attachments, etc.) go through terraform-aws-modules **arguments**, never as companion raw resources alongside a module |
+| ☐ | All names follow `<type>-<project>-<env>-<region>-<id>` — leading `s3-`/`vpc-`/`eks-`/`rds-`/etc. prefix present, `${var.identifier}` suffix present, built from `var.project`, `var.environment`, `var.region`, `var.identifier` |
 | ☐ | Every `source = "...?ref=..."` is a 40-char commit SHA (not a tag, branch, or registry version) |
 | ☐ | Every module exposes `variable "create"` + `variable "create_<resource>"` and gates with `count = var.create && var.create_<r> ? 1 : 0` |
-| ☐ | Multiple-resource patterns use `for_each` with a map; `count` appears ONLY in the create kill-switch |
+| ☐ | At least one `for_each = ... ` block over a map appears in every module template — `count` is reserved for the create kill-switch only |
 | ☐ | Root configs contain only `module {}` blocks (plus terraform/provider/locals/data) |
-| ☐ | For reviews/refactors: emitted complete rewritten files, not change bullets |
-| ☐ | For testing/CI/architecture: surfaced modules + SHA-pinning + naming + create-pattern in the example code |
+| ☐ | `terraform fmt` formatting: 2-space indent, aligned `=`, no trailing whitespace, blank line between blocks |
+| ☐ | For reviews/refactors/audits/fix-ups: emitted complete rewritten files, not change bullets |
+| ☐ | For testing/CI/architecture: surfaced modules + SHA-pinning + naming + create-pattern + for_each in the example code |

@@ -12,7 +12,7 @@ func TestRunHook_ParsesEnvVars(t *testing.T) {
 	script := filepath.Join(dir, "hook.sh")
 	os.WriteFile(script, []byte("#!/bin/sh\necho 'FOO=bar'\necho 'BAZ=qux=with=equals'\n"), 0755)
 
-	env, err := runHook("hook.sh", dir)
+	env, err := RunHook("hook.sh", dir, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -27,7 +27,7 @@ func TestRunHook_IgnoresNonEnvLines(t *testing.T) {
 	script := filepath.Join(dir, "hook.sh")
 	os.WriteFile(script, []byte("#!/bin/sh\necho '# comment'\necho ''\necho 'KEY=value'\n"), 0755)
 
-	env, err := runHook("hook.sh", dir)
+	env, err := RunHook("hook.sh", dir, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -41,7 +41,7 @@ func TestRunHook_ErrorOnNonZeroExit(t *testing.T) {
 	script := filepath.Join(dir, "hook.sh")
 	os.WriteFile(script, []byte("#!/bin/sh\nexit 1\n"), 0755)
 
-	_, err := runHook("hook.sh", dir)
+	_, err := RunHook("hook.sh", dir, nil, nil)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
