@@ -55,6 +55,11 @@ Once the skill is being invoked reliably, improve the body:
 3. **Do not pad** the body with content that isn't skill-specific
 4. Keep the description to **1–2 sentences maximum**
 5. The `version` field should be left as-is (the loop manages versioning)
+6. The frontmatter must be **valid YAML**. If the `description` contains any
+   YAML-special characters — most commonly `:` (colon-space), but also `#`, `[`, `{`,
+   or leading `&`/`*`/`!` — wrap the whole value in **single quotes** (double an inner
+   `'` to escape it). Backticks are **not** quotes and do **not** make a value safe.
+   Example: `description: 'Use for CI (`runs: using: node20`), matrix builds, and OIDC.'`
 
 ## Output Format
 

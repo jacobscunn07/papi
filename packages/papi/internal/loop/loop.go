@@ -653,7 +653,19 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, st *st
 			rep.Emit(progress.ResearchAgentDone{Iter: iter, Description: description, Cost: agentCost, SkillMd: proposedSkillMd})
 		}
 
-		if !cfg.DryRun {
+		// The agent occasionally emits invalid YAML frontmatter (e.g. an unquoted
+		// description containing ": "). Repair the common cases; if it still won't
+		// parse, reject this proposal instead of writing a file that would crash the
+		// next scenario read and abort the whole run.
+		var proposalValid bool
+		if fixed, ok := config.RepairFrontmatter(proposedSkillMd); ok {
+			proposedSkillMd = fixed
+			proposalValid = true
+		} else {
+			rep.Emit(progress.LogLine{Text: fmt.Sprintf("  → REJECTED: proposed SKILL.md has invalid YAML frontmatter (iter %d)", iter)})
+		}
+
+		if proposalValid && !cfg.DryRun {
 			if err := os.WriteFile(filepath.Join(cfg.SkillDir, "SKILL.md"), []byte(proposedSkillMd), 0644); err != nil {
 				return err
 			}
@@ -670,8 +682,15 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, st *st
 			_ = st.SaveIteration(cfg.SkillName, runTimestamp, iter, scorer.AggregateScore(partial),
 				time.Since(iterStart).Milliseconds(), description, iterSkillMd, partial)
 		}
-		iterResults, iterCost, err := runAllScenarios(ctx, iter, scenarios, cfg, evalList, iterDir, hooks, hooksBaseDir, iterRep, stream, completed, persistIter)
-		totalCost += iterCost
+		// A rejected proposal is scored 0 (AggregateScore of nil results) and flows
+		// through the not-improved path below, keeping the current best on disk.
+		var iterResults []types.ScenarioRunResult
+		var iterCost float64
+		var err error
+		if proposalValid {
+			iterResults, iterCost, err = runAllScenarios(ctx, iter, scenarios, cfg, evalList, iterDir, hooks, hooksBaseDir, iterRep, stream, completed, persistIter)
+			totalCost += iterCost
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				_ = st.SaveIteration(cfg.SkillName, runTimestamp, iter, scorer.AggregateScore(iterResults), time.Since(iterStart).Milliseconds(), description, iterSkillMd, iterResults)
