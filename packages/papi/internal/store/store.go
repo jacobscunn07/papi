@@ -312,15 +312,15 @@ func (s *Store) ScenarioResults(skill, ts string, idx int) ([]types.ScenarioRunR
 	var scens []scenRow
 	for rows.Next() {
 		var (
-			id           int64
-			defJSON      string
-			score        float64
-			invoked      int
-			invOut       sql.NullString
-			qualOut      sql.NullString
-			invTrans     string
-			qualTrans    string
-			durationMs   int64
+			id         int64
+			defJSON    string
+			score      float64
+			invoked    int
+			invOut     sql.NullString
+			qualOut    sql.NullString
+			invTrans   string
+			qualTrans  string
+			durationMs int64
 		)
 		if err := rows.Scan(&id, &defJSON, &score, &invoked, &invOut, &qualOut, &invTrans, &qualTrans, &durationMs); err != nil {
 			return nil, err

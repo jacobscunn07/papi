@@ -397,7 +397,10 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, st *st
 		ids[i] = s.ID
 	}
 
-	evalList := evals.NewRegistry(cfg.CustomEvalsDir)
+	evalList, err := evals.NewRegistry(cfg.CustomEvalsDir)
+	if err != nil {
+		return fmt.Errorf("build eval registry: %w", err)
+	}
 	git := researchgit.New(repoRoot)
 	var totalCost float64
 

@@ -40,8 +40,9 @@ Flags are bound to viper: every flag is also settable via `.papi/config` (YAML) 
 prefixed `RESEARCH_` with `-`→`_` (e.g. `RESEARCH_BUDGET`, `RESEARCH_ITERATIONS`).
 
 The loop shells out to the `claude` CLI for all model calls, so `claude` must be on PATH and
-authenticated. Custom evals/hooks shell out to `tsx`, `node`, `python3`, `bash`, or `go run`
-depending on file extension — those runtimes must be installed for the evals that use them.
+authenticated. Custom evals and hooks must be written in **TypeScript or JavaScript** — nothing
+else is supported. `.ts` runs under `tsx`, `.js` under `node`; both must be on PATH. Any other
+extension is a hard error, not a silent skip.
 
 ## The loop architecture (`packages/papi/internal/`)
 
@@ -88,14 +89,14 @@ This split is the core mental model of the whole system:
   optional `fixtures`, `tags`, `shouldInvoke`). **Do not name the skill in the prompt** — the
   invocation phase tests whether the description alone triggers it. Set `shouldInvoke: false` for
   negative cases that must *not* trigger the skill.
-- **Custom evals:** files named `*.eval.<ext>` in `.papi/skills/<name>/evals/` (`.ts .js .py .sh .go`).
+- **Custom evals:** files named `*.eval.ts` or `*.eval.js` in `.papi/skills/<name>/evals/`.
   Each receives the `EvalContext` as JSON on **stdin** and must print an `EvalResult` JSON to **stdout**
   (`evalId`, `name`, `score` 0–1, `reasoning`, optional `required`). Script evals are always treated as
   non-LLM-judge. See `evals/types.ts` for the context/result shapes. The two built-in evals
   (`skill-used`, `output-quality`) are always included.
 - **Hooks:** declared in `.papi/skills/<name>/config.yaml` under `hooks:`. Lifecycle points:
   `pre/post-run`, `pre/post-iteration`, `pre/post-scenario`, `pre/post-eval`, `post-quality`.
-  Each accepts a single path or an ordered list; runner is chosen by extension. Hooks communicate
+  Each accepts a single path or an ordered list, and must be a `.ts` or `.js` file. Hooks communicate
   by printing `KEY=VALUE` lines to stdout (injected as env vars into subsequent commands/phases);
   all other stdout/stderr is routed to the progress reporter, never the terminal.
 

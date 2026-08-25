@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"papi/internal/script"
 	"papi/internal/types"
 )
 
@@ -43,37 +44,37 @@ func (e *scriptEval) Evaluate(ctx types.EvalContext) (types.EvalResult, error) {
 	return result, nil
 }
 
-// resolveEvalRunner returns the command prefix for executing the given eval file based on its extension.
-func resolveEvalRunner(filePath string) ([]string, bool) {
-	switch filepath.Ext(filePath) {
-	case ".ts":
-		return []string{"tsx"}, true
-	case ".js":
-		return []string{"node"}, true
-	case ".py":
-		return []string{"python3"}, true
-	case ".sh":
-		return []string{"bash"}, true
-	case ".go":
-		return []string{"go", "run"}, true
-	}
-	return nil, false
-}
+// unsupportedEvalExts are extensions papi used to execute. A leftover file with
+// one of these produces an error naming it, rather than being silently ignored
+// by the narrowed glob below.
+var unsupportedEvalExts = []string{".py", ".sh", ".go"}
 
-// discoverEvals finds *.eval.<ext> files in dir for all supported languages and returns them as Eval instances.
-// Returns nil (not error) if dir does not exist or has no eval files.
-func discoverEvals(dir string) []types.Eval {
-	exts := []string{".ts", ".js", ".py", ".sh", ".go"}
-	var out []types.Eval
-	for _, ext := range exts {
+// discoverEvals finds *.eval.ts and *.eval.js files in dir and returns them as Eval instances.
+// Returns nil (not error) if dir does not exist or has no eval files; returns an error if dir
+// contains an eval file written in a no-longer-supported language.
+func discoverEvals(dir string) ([]types.Eval, error) {
+	for _, ext := range unsupportedEvalExts {
 		matches, err := filepath.Glob(filepath.Join(dir, "*.eval"+ext))
-		if err != nil || len(matches) == 0 {
-			continue
+		if err != nil {
+			return nil, fmt.Errorf("scan evals dir %s: %w", dir, err)
 		}
-		runner, _ := resolveEvalRunner("x" + ext)
+		if len(matches) > 0 {
+			return nil, fmt.Errorf("unsupported eval %s: evals must be .ts or .js", matches[0])
+		}
+	}
+
+	var out []types.Eval
+	for _, ext := range script.SupportedExts {
+		matches, err := filepath.Glob(filepath.Join(dir, "*.eval"+ext))
+		if err != nil {
+			return nil, fmt.Errorf("scan evals dir %s: %w", dir, err)
+		}
+		runner, err := script.Resolve("eval" + ext)
+		if err != nil {
+			return nil, err
+		}
 		for _, f := range matches {
-			base := filepath.Base(f)
-			id := strings.TrimSuffix(base, ".eval"+ext)
+			id := strings.TrimSuffix(filepath.Base(f), ".eval"+ext)
 			out = append(out, &scriptEval{
 				id:       id,
 				name:     id,
@@ -82,5 +83,5 @@ func discoverEvals(dir string) []types.Eval {
 			})
 		}
 	}
-	return out
+	return out, nil
 }

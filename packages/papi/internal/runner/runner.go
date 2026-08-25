@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"papi/internal/progress"
+	"papi/internal/script"
 	"papi/internal/types"
 )
 
@@ -127,8 +128,8 @@ func handleStreamLine(line string, phase progress.Phase, sink StreamSink, final 
 // output is routed to rep (never to the terminal directly).
 func RunHooks(scripts []string, baseDir string, extraEnv []string, rep progress.Reporter) ([]string, error) {
 	var accumulated []string
-	for _, script := range scripts {
-		newVars, err := RunHook(script, baseDir, append(extraEnv, accumulated...), rep)
+	for _, path := range scripts {
+		newVars, err := RunHook(path, baseDir, append(extraEnv, accumulated...), rep)
 		if err != nil {
 			return nil, err
 		}
@@ -137,29 +138,16 @@ func RunHooks(scripts []string, baseDir string, extraEnv []string, rep progress.
 	return accumulated, nil
 }
 
-// resolveHookRunner returns the command to execute the hook script based on its extension.
-func resolveHookRunner(scriptPath string) []string {
-	switch filepath.Ext(scriptPath) {
-	case ".py":
-		return []string{"python3"}
-	case ".js":
-		return []string{"node"}
-	case ".ts":
-		return []string{"tsx"}
-	case ".go":
-		return []string{"go", "run"}
-	default:
-		return []string{"sh"}
-	}
-}
-
 // RunHook executes a hook script and returns any KEY=VALUE lines from its stdout
 // as env vars to inject into subsequent commands. Hook stdout/stderr is captured
 // (never written to the terminal) and any non-KEY=VALUE lines are forwarded to rep
 // as log output so they don't corrupt the TUI.
 func RunHook(scriptPath, baseDir string, extraEnv []string, rep progress.Reporter) ([]string, error) {
 	abs := filepath.Join(baseDir, scriptPath)
-	runner := resolveHookRunner(abs)
+	runner, err := script.Resolve(abs)
+	if err != nil {
+		return nil, err
+	}
 	args := append(runner[1:], abs)
 	cmd := exec.Command(runner[0], args...)
 	if len(extraEnv) > 0 {
