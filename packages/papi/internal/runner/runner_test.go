@@ -9,10 +9,10 @@ import (
 
 func TestRunHook_ParsesEnvVars(t *testing.T) {
 	dir := t.TempDir()
-	script := filepath.Join(dir, "hook.sh")
-	os.WriteFile(script, []byte("#!/bin/sh\necho 'FOO=bar'\necho 'BAZ=qux=with=equals'\n"), 0755)
+	script := filepath.Join(dir, "hook.js")
+	os.WriteFile(script, []byte("console.log('FOO=bar');\nconsole.log('BAZ=qux=with=equals');\n"), 0755)
 
-	env, err := RunHook("hook.sh", dir, nil, nil)
+	env, err := RunHook("hook.js", dir, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -24,10 +24,10 @@ func TestRunHook_ParsesEnvVars(t *testing.T) {
 
 func TestRunHook_IgnoresNonEnvLines(t *testing.T) {
 	dir := t.TempDir()
-	script := filepath.Join(dir, "hook.sh")
-	os.WriteFile(script, []byte("#!/bin/sh\necho '# comment'\necho ''\necho 'KEY=value'\n"), 0755)
+	script := filepath.Join(dir, "hook.js")
+	os.WriteFile(script, []byte("console.log('# comment');\nconsole.log('');\nconsole.log('KEY=value');\n"), 0755)
 
-	env, err := RunHook("hook.sh", dir, nil, nil)
+	env, err := RunHook("hook.js", dir, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -38,11 +38,24 @@ func TestRunHook_IgnoresNonEnvLines(t *testing.T) {
 
 func TestRunHook_ErrorOnNonZeroExit(t *testing.T) {
 	dir := t.TempDir()
+	script := filepath.Join(dir, "hook.js")
+	os.WriteFile(script, []byte("process.exit(1);\n"), 0755)
+
+	_, err := RunHook("hook.js", dir, nil, nil)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
+
+// A hook in a language papi no longer supports must fail loudly rather than
+// falling back to a shell.
+func TestRunHook_UnsupportedExtension(t *testing.T) {
+	dir := t.TempDir()
 	script := filepath.Join(dir, "hook.sh")
-	os.WriteFile(script, []byte("#!/bin/sh\nexit 1\n"), 0755)
+	os.WriteFile(script, []byte("#!/bin/sh\necho 'FOO=bar'\n"), 0755)
 
 	_, err := RunHook("hook.sh", dir, nil, nil)
 	if err == nil {
-		t.Fatal("expected error, got nil")
+		t.Fatal("expected error for .sh hook, got nil")
 	}
 }

@@ -2,6 +2,7 @@ import { execFile } from 'child_process';
 import { readdir } from 'fs/promises';
 import { promisify } from 'util';
 import type { Eval, EvalContext, EvalResult } from './types.js';
+import { runEval } from './utils.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -55,16 +56,4 @@ const terraformValidEval: Eval = {
 
 export default terraformValidEval;
 
-// Subprocess entry point: called by papi via `tsx <file>` with EvalContext JSON on stdin
-const chunks: Buffer[] = [];
-process.stdin.on('data', (c: Buffer) => chunks.push(c));
-process.stdin.on('end', async () => {
-  const ctx: EvalContext = JSON.parse(Buffer.concat(chunks).toString());
-  try {
-    const result = await terraformValidEval.evaluate(ctx);
-    process.stdout.write(JSON.stringify(result));
-  } catch (err) {
-    process.stderr.write(String(err));
-    process.exit(1);
-  }
-});
+runEval((ctx) => terraformValidEval.evaluate(ctx));
