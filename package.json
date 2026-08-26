@@ -10,9 +10,15 @@
     "papi": "go run -C packages/papi . --repo-root $INIT_CWD"
   },
   "devDependencies": {
+    "@cdktf/hcl2json": "^0.21.0",
+    "@eslint/json": "^2.0.1",
+    "@eslint/markdown": "^8.0.3",
     "@types/node": "^20.0.0",
+    "eslint": "^10.9.1",
+    "tree-sitter-go": "^0.25.0",
     "tsx": "^4.7.0",
     "typescript": "^5.4.0",
-    "vitest": "^1.4.0"
+    "vitest": "^1.4.0",
+    "web-tree-sitter": "^0.26.13"
   }
 }

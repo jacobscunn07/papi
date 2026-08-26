@@ -22,34 +22,19 @@ export function collectGoFiles(dir: string): string[] {
   return out;
 }
 
-/** Concatenates the contents of the given files, skipping any that fail to read. */
-export function readAll(files: string[]): string {
-  return files
-    .map((f) => {
-      try {
-        return readFileSync(f, 'utf8');
-      } catch {
-        return '';
-      }
-    })
-    .join('\n');
-}
-
-/** Counts the lines of src matching re, mirroring `grep -cE`. */
-export function countMatchingLines(src: string, re: RegExp): number {
-  return src.split('\n').filter((line) => re.test(line)).length;
-}
-
 /**
  * Runs the common preamble every go-author eval shares: bail out when the skill
  * was not invoked, when there is no work directory, or when no Go source was
- * written. Returns the concatenated Go source, or an EvalResult to emit as-is.
+ * written. Returns the contents of each Go file, or an EvalResult to emit as-is.
+ *
+ * Files are kept separate rather than concatenated: every Go file opens with its
+ * own `package` clause, so joining them produces source that does not parse.
  */
 export function loadGoSource(
   ctx: EvalContext,
   evalId: string,
   name: string,
-): { src: string } | { result: EvalResult } {
+): { sources: string[] } | { result: EvalResult } {
   const fail = (reasoning: string) => ({ result: { evalId, name, score: 0.0, reasoning } });
 
   if (!ctx.invoked || !ctx.qualityTranscript) return fail('Skipped — skill not invoked.');
@@ -58,7 +43,17 @@ export function loadGoSource(
   const files = collectGoFiles(ctx.workDir);
   if (files.length === 0) return fail('No Go files written to disk.');
 
-  return { src: readAll(files) };
+  const sources: string[] = [];
+  for (const f of files) {
+    try {
+      sources.push(readFileSync(f, 'utf8'));
+    } catch {
+      // Unreadable file: skip it rather than failing the whole eval.
+    }
+  }
+  if (sources.length === 0) return fail('No Go files could be read.');
+
+  return { sources };
 }
 
 /** Subprocess entry point: reads EvalContext JSON from stdin, writes EvalResult to stdout. */

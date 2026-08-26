@@ -1,5 +1,7 @@
 import type { Eval, EvalContext, EvalResult } from './types.js';
-import { extractCodeBlocks } from './utils.js';
+import { lintJson, memberPath, messagesFor, type EvalRule } from './eslint-runner.js';
+import { blockAttribute, loadTerraformJson } from './terraform-json.js';
+import { runEval } from './utils.js';
 
 const EVAL_ID = 'no-count';
 const EVAL_NAME = 'No count — use for_each';
@@ -11,14 +13,32 @@ const result = (score: number, reasoning: string): EvalResult => ({
   reasoning,
 });
 
-const COMMENT_RE = /#[^\n]*/g;
-// `count = var.create*` is the sanctioned conditional-creation idiom, not a violation.
-const CREATE_COUNT_RE = /count\s*=\s*var\.create\w*/g;
-const COUNT_RE = /\bcount\s*=/;
-const FOR_EACH_RE = /\bfor_each\s*=/;
+// `count = var.create*` is the sanctioned conditional-creation idiom, not a
+// violation. hcl2json renders HCL expressions as interpolation strings, so
+// `count = var.create_web ? 1 : 0` arrives as "${var.create_web ? 1 : 0}".
+const CREATE_VAR_RE = /\bvar\.create\w*/;
 
-function isCountViolation(code: string): boolean {
-  return COUNT_RE.test(code.replace(CREATE_COUNT_RE, ''));
+// Blocks that take meta-arguments. `variable` is excluded so a variable actually
+// named "count" is not mistaken for the meta-argument.
+const META_ARG_BLOCKS = new Set(['resource', 'data', 'module']);
+
+function metaArgRule(attrName: string, describe: (address: string) => string): EvalRule {
+  return {
+    create(context) {
+      return {
+        Member(node) {
+          const attr = blockAttribute(memberPath(context, node));
+          if (!attr || attr.attr !== attrName || !META_ARG_BLOCKS.has(attr.kind)) return;
+
+          const value: unknown = node.value?.value;
+          if (attrName === 'count' && typeof value === 'string' && CREATE_VAR_RE.test(value)) {
+            return; // conditional-creation idiom
+          }
+          context.report({ node, message: describe(attr.address) });
+        },
+      };
+    },
+  };
 }
 
 const noCountEval: Eval = {
@@ -30,40 +50,29 @@ const noCountEval: Eval = {
       return result(0.0, 'Skipped — skill not invoked.');
     }
 
-    const blocks = extractCodeBlocks(ctx.qualityTranscript);
-    let hasForEach = false;
-
-    for (const block of blocks) {
-      const stripped = block.replace(COMMENT_RE, '');
-      if (isCountViolation(stripped)) {
-        return result(0.1, 'Response contains `count =` in a code example. Use `for_each` instead.');
-      }
-      if (FOR_EACH_RE.test(stripped)) {
-        hasForEach = true;
-      }
+    const { doc, source } = await loadTerraformJson(ctx);
+    if (source === 'none') {
+      return result(0.5, 'No parseable Terraform found — cannot determine for_each usage.');
     }
 
-    if (blocks.length > 0 && hasForEach) {
-      return result(1.0, 'Code uses `for_each` with no `count =` violations.');
+    const messages = await lintJson(doc, {
+      'no-count': metaArgRule('count', (a) => `${a} uses \`count\``),
+      'for-each': metaArgRule('for_each', (a) => `${a} uses \`for_each\``),
+    });
+
+    const violations = messagesFor(messages, 'no-count');
+    if (violations.length > 0) {
+      const where = violations.map((m) => m.message).join('; ');
+      return result(0.1, `Terraform uses \`count\` instead of \`for_each\` (${where}).`);
     }
-    if (blocks.length > 0) {
-      return result(0.6, 'Code blocks present but no `for_each` usage detected.');
+
+    if (messagesFor(messages, 'for-each').length > 0) {
+      return result(1.0, 'Terraform uses `for_each` with no `count` violations.');
     }
-    return result(0.5, 'No code blocks found — cannot determine for_each usage.');
+    return result(0.6, 'Terraform present but no `for_each` usage detected.');
   },
 };
 
 export default noCountEval;
 
-// Subprocess entry point: called by papi via `tsx <file>` with EvalContext JSON on stdin
-const chunks: Buffer[] = [];
-process.stdin.on('data', (c: Buffer) => chunks.push(c));
-process.stdin.on('end', async () => {
-  try {
-    const ctx: EvalContext = JSON.parse(Buffer.concat(chunks).toString());
-    process.stdout.write(JSON.stringify(await noCountEval.evaluate(ctx)));
-  } catch (err) {
-    process.stderr.write(String(err));
-    process.exit(1);
-  }
-});
+runEval((ctx) => noCountEval.evaluate(ctx));

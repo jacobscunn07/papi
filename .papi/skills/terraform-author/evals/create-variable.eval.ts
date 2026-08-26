@@ -1,5 +1,7 @@
 import type { Eval, EvalContext, EvalResult } from './types.js';
-import { joinCodeBlocks } from './utils.js';
+import { lintJson, memberPath, messagesFor, type EvalRule } from './eslint-runner.js';
+import { loadTerraformJson } from './terraform-json.js';
+import { runEval } from './utils.js';
 
 const EVAL_ID = 'create-variable';
 const EVAL_NAME = 'create variable pattern';
@@ -11,8 +13,22 @@ const result = (score: number, reasoning: string): EvalResult => ({
   reasoning,
 });
 
-const GLOBAL_RE = /variable\s+"create"\s*\{|var\.create\b/;
-const PER_RESOURCE_RE = /variable\s+"create_\w+"\s*\{|var\.create_\w+/;
+const PER_RESOURCE_RE = /^create_\w+$/;
+
+/** Reports `variable` blocks whose label matches. Path shape is variable.<name>. */
+function variableNameRule(matches: (name: string) => boolean): EvalRule {
+  return {
+    create(context) {
+      return {
+        Member(node) {
+          const path = memberPath(context, node);
+          if (path.length !== 2 || path[0] !== 'variable' || !matches(path[1])) return;
+          context.report({ node, message: `var.${path[1]}` });
+        },
+      };
+    },
+  };
+}
 
 const createVariableEval: Eval = {
   id: EVAL_ID,
@@ -23,38 +39,31 @@ const createVariableEval: Eval = {
       return result(0.0, 'Skipped — skill not invoked.');
     }
 
-    const code = joinCodeBlocks(ctx.qualityTranscript);
-    if (!code) {
-      return result(0.5, 'No code blocks found — cannot determine pattern usage.');
+    const { doc, source } = await loadTerraformJson(ctx);
+    if (source === 'none') {
+      return result(0.5, 'No parseable Terraform found — cannot determine pattern usage.');
     }
 
-    const hasGlobal = GLOBAL_RE.test(code);
-    const hasPerResource = PER_RESOURCE_RE.test(code);
+    const messages = await lintJson(doc, {
+      'global-create': variableNameRule((name) => name === 'create'),
+      'per-resource-create': variableNameRule((name) => PER_RESOURCE_RE.test(name)),
+    });
+    const hasGlobal = messagesFor(messages, 'global-create').length > 0;
+    const perResource = messagesFor(messages, 'per-resource-create').map((m) => m.message);
 
-    if (hasGlobal && hasPerResource) {
-      return result(1.0, 'Code uses both global `create` and per-resource `create_<name>` variables.');
+    if (hasGlobal && perResource.length > 0) {
+      return result(1.0, `Terraform declares both \`var.create\` and per-resource variables (${perResource.join(', ')}).`);
     }
     if (hasGlobal) {
-      return result(0.6, 'Code uses global `var.create` but missing per-resource `create_<name>` variables.');
+      return result(0.6, 'Terraform declares `var.create` but no per-resource `create_<name>` variables.');
     }
     return result(
       0.5,
-      'Code present but no create variable pattern detected — may not be applicable to this scenario.',
+      'Terraform present but no create variable pattern detected — may not be applicable to this scenario.',
     );
   },
 };
 
 export default createVariableEval;
 
-// Subprocess entry point: called by papi via `tsx <file>` with EvalContext JSON on stdin
-const chunks: Buffer[] = [];
-process.stdin.on('data', (c: Buffer) => chunks.push(c));
-process.stdin.on('end', async () => {
-  try {
-    const ctx: EvalContext = JSON.parse(Buffer.concat(chunks).toString());
-    process.stdout.write(JSON.stringify(await createVariableEval.evaluate(ctx)));
-  } catch (err) {
-    process.stderr.write(String(err));
-    process.exit(1);
-  }
-});
+runEval((ctx) => createVariableEval.evaluate(ctx));

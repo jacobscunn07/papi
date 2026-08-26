@@ -1,4 +1,7 @@
 import type { Eval, EvalContext, EvalResult } from './types.js';
+import { lintJson, memberPath, messagesFor, type EvalRule } from './eslint-runner.js';
+import { loadTerraformJson } from './terraform-json.js';
+import { runEval } from './utils.js';
 
 const EVAL_ID = 'uses-modules';
 const EVAL_NAME = 'Prefer modules over raw resources';
@@ -10,9 +13,31 @@ const result = (score: number, reasoning: string): EvalResult => ({
   reasoning,
 });
 
-// Matched against the whole transcript, not just fenced code blocks.
-const MODULE_RE = /module\s+"/;
-const RAW_RESOURCE_RE = /resource\s+"aws_/;
+/** Reports each `resource "aws_*"` block — the path shape is resource.<type>.<name>. */
+const rawAwsResourceRule: EvalRule = {
+  create(context) {
+    return {
+      Member(node) {
+        const path = memberPath(context, node);
+        if (path.length !== 3 || path[0] !== 'resource' || !path[1].startsWith('aws_')) return;
+        context.report({ node, message: `resource.${path[1]}.${path[2]}` });
+      },
+    };
+  },
+};
+
+/** Reports each `module` block — the path shape is module.<name>. */
+const moduleBlockRule: EvalRule = {
+  create(context) {
+    return {
+      Member(node) {
+        const path = memberPath(context, node);
+        if (path.length !== 2 || path[0] !== 'module') return;
+        context.report({ node, message: `module.${path[1]}` });
+      },
+    };
+  },
+};
 
 const usesModulesEval: Eval = {
   id: EVAL_ID,
@@ -23,33 +48,31 @@ const usesModulesEval: Eval = {
       return result(0.0, 'Skipped — skill not invoked.');
     }
 
-    const hasModule = MODULE_RE.test(ctx.qualityTranscript);
-    const hasRaw = RAW_RESOURCE_RE.test(ctx.qualityTranscript);
+    const { doc, source } = await loadTerraformJson(ctx);
+    if (source === 'none') {
+      return result(0.5, 'No parseable Terraform found — cannot determine module usage.');
+    }
 
-    if (hasModule && !hasRaw) {
-      return result(1.0, 'Code uses module blocks with no raw aws_* resources.');
+    const messages = await lintJson(doc, {
+      'raw-aws-resource': rawAwsResourceRule,
+      'module-block': moduleBlockRule,
+    });
+    const raw = messagesFor(messages, 'raw-aws-resource').map((m) => m.message);
+    const modules = messagesFor(messages, 'module-block').map((m) => m.message);
+
+    if (modules.length > 0 && raw.length === 0) {
+      return result(1.0, `Terraform uses module blocks with no raw aws_* resources (${modules.join(', ')}).`);
     }
-    if (!hasModule && hasRaw) {
-      return result(0.1, 'Code uses raw resource "aws_*" blocks instead of modules.');
+    if (modules.length === 0 && raw.length > 0) {
+      return result(0.1, `Terraform uses raw aws_* resources instead of modules (${raw.join(', ')}).`);
     }
-    if (hasModule && hasRaw) {
-      return result(0.4, 'Code mixes module blocks and raw aws_* resources.');
+    if (modules.length > 0 && raw.length > 0) {
+      return result(0.4, `Terraform mixes module blocks (${modules.join(', ')}) and raw aws_* resources (${raw.join(', ')}).`);
     }
-    return result(0.5, 'Code present but no module or aws_* resource pattern detected.');
+    return result(0.5, 'Terraform present but no module or aws_* resource blocks detected.');
   },
 };
 
 export default usesModulesEval;
 
-// Subprocess entry point: called by papi via `tsx <file>` with EvalContext JSON on stdin
-const chunks: Buffer[] = [];
-process.stdin.on('data', (c: Buffer) => chunks.push(c));
-process.stdin.on('end', async () => {
-  try {
-    const ctx: EvalContext = JSON.parse(Buffer.concat(chunks).toString());
-    process.stdout.write(JSON.stringify(await usesModulesEval.evaluate(ctx)));
-  } catch (err) {
-    process.stderr.write(String(err));
-    process.exit(1);
-  }
-});
+runEval((ctx) => usesModulesEval.evaluate(ctx));
