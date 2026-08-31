@@ -24,12 +24,13 @@ score goes up.
 ## Commands
 
 ```bash
-# Run the loop on a skill (npm wrapper passes --repo-root $INIT_CWD so it works from repo root)
-npm run papi -- --skill terraform-author --iterations 20 --budget 5.0
-# Equivalent direct invocation (note: subcommand is `run`, the npm script omits it):
+# Run the loop on a skill (npm wrapper passes --repo-root "$INIT_CWD" so it works from repo root)
+npm run papi -- run terraform-author --iterations 20 --budget 5.0
+# Equivalent direct invocation:
 go run -C packages/papi . run terraform-author --iterations 20 --budget 5.0
 
 # Launch the interactive TUI (no subcommand): skill picker + live/past run browser
+npm run papi
 go run -C packages/papi .
 
 # Useful flags: --dry-run (eval without writing SKILL.md or committing), --tags a,b
@@ -113,6 +114,9 @@ This split is the core mental model of the whole system:
 
 ## Conventions
 
+- All flags live on the root command's persistent flag set (`cmd/loop.go`), so they apply to
+  `papi run` and to the bare TUI invocation alike (the TUI builds configs from the same viper
+  settings).
 - `appconfig.Resolve` walks up from `--repo-root` to find the nearest `.papi/` dir, so commands
   work from the repo root or a subdirectory. `appconfig.Build` assembles the `ResearchConfig`.
 - Keep `internal/types` free of dependencies on other internal packages — it's the shared schema

@@ -26,12 +26,14 @@ packages/papi/       # Autoresearch loop (Go, private, not distributed)
 ## Run the research loop
 
 ```bash
-npm run papi -- --skill terraform-author --iterations 20 --budget 5.0
+npm run papi -- run terraform-author --iterations 20 --budget 5.0
 ```
+
+With no subcommand, `npm run papi` launches the interactive TUI (skill picker +
+live/past run browser).
 
 Options:
 ```
---skill <name>           Skill to research (default: terraform-author)
 --iterations <n>         Max iterations (default: 20)
 --budget <usd>           Max API spend in USD (default: 5.0)
 --tags <tags>            Filter scenarios by tag (comma-separated)

@@ -7,7 +7,7 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
-    "papi": "go run -C packages/papi . --repo-root $INIT_CWD"
+    "papi": "go run -C packages/papi . --repo-root \"${INIT_CWD:-$PWD}\""
   },
   "devDependencies": {
     "@cdktf/hcl2json": "^0.21.0",
