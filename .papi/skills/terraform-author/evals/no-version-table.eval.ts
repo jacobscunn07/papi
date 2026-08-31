@@ -71,17 +71,30 @@ const noVersionTableEval: Eval = {
   name: EVAL_NAME,
 
   async evaluate(ctx: EvalContext): Promise<EvalResult> {
-    // Checks the SKILL.md body itself, so it does not depend on invocation.
-    const md = ctx.skillContent ?? '';
-    const offenders = messagesFor(await lintMarkdown(md, { 'catalog-table': catalogTableRule }), 'catalog-table');
+    // Checks the skill's own text, so it does not depend on invocation. Reference
+    // files count as part of the skill: a catalog table moved into references/ is
+    // just as stale as one left in SKILL.md, and scanning only SKILL.md would let
+    // progressive disclosure launder it past this guard.
+    const sources = [
+      { label: 'SKILL.md', text: ctx.skillContent ?? '' },
+      ...(ctx.skillFiles ?? []).map((f) => ({ label: f.path, text: f.content })),
+    ];
 
-    if (offenders.length === 0) {
-      return result(1.0, 'No module/version/SHA catalog table found in SKILL.md.');
+    const offenders: { label: string; message: string }[] = [];
+    for (const { label, text } of sources) {
+      const found = messagesFor(await lintMarkdown(text, { 'catalog-table': catalogTableRule }), 'catalog-table');
+      offenders.push(...found.map((m) => ({ label, message: m.message })));
     }
 
+    const scanned = sources.map((s) => s.label).join(', ');
+    if (offenders.length === 0) {
+      return result(1.0, `No module/version/SHA catalog table found in ${scanned}.`);
+    }
+
+    const first = offenders[0];
     return result(
       0.0,
-      `SKILL.md contains ${offenders.length} catalog table(s) enumerating versions/SHAs (e.g. ${offenders[0].message}). This data goes stale; teach how to find/pin versions instead of listing current values.`,
+      `The skill contains ${offenders.length} catalog table(s) enumerating versions/SHAs (e.g. in ${first.label}: ${first.message}). This data goes stale; teach how to find/pin versions instead of listing current values.`,
     );
   },
 };

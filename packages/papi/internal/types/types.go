@@ -37,6 +37,14 @@ type Scenario struct {
 	ShouldInvoke *bool             `yaml:"shouldInvoke" json:"shouldInvoke"`
 }
 
+// SkillFile is one supporting file of a skill that lives alongside SKILL.md -
+// the progressive-disclosure references SKILL.md points at and Claude reads on
+// demand. Path is always relative to the skill directory (e.g. "references/ci.md").
+type SkillFile struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
 // Hooks holds lifecycle hook script lists for a skill. Each field accepts either
 // a single script path (string) or an ordered list of script paths ([]string).
 type Hooks struct {
@@ -74,7 +82,10 @@ type ClaudeJsonOutput struct {
 	} `json:"usage"`
 }
 
-// EvalContext carries all information available to an eval function.
+// EvalContext carries all information available to an eval function. SkillContent is
+// SKILL.md's body; SkillFiles carries the reference files it discloses, so an eval that
+// inspects the skill sees all of it and cannot be evaded by moving content out of
+// SKILL.md.
 type EvalContext struct {
 	Scenario             Scenario          `json:"scenario"`
 	InvocationTranscript string            `json:"invocationTranscript"`
@@ -84,6 +95,7 @@ type EvalContext struct {
 	SkillName            string            `json:"skillName"`
 	SkillDescription     string            `json:"skillDescription"`
 	SkillContent         string            `json:"skillContent"`
+	SkillFiles           []SkillFile       `json:"skillFiles"`
 	SkillDir             string            `json:"skillDir"`
 	WorkDir              string            `json:"workDir"`
 	Invoked              bool              `json:"invoked"`
@@ -151,8 +163,8 @@ type ResearchConfig struct {
 	DryRun            bool
 	Resume            bool    // resume an unfinished run instead of starting fresh
 	ResumeTimestamp   string  // specific run to resume ("" = latest resumable)
-	ScenarioModel     string  // Invocation Phase model — description-only check (default: claude-haiku-4-5-20251001)
-	QualityModel      string  // Quality Phase model — full skill execution (default: claude-sonnet-4-6)
+	ScenarioModel     string  // Invocation Phase model - description-only check (default: claude-haiku-4-5-20251001)
+	QualityModel      string  // Quality Phase model - full skill execution (default: claude-sonnet-4-6)
 	ResearchModel     string  // Research agent improvement loop (default: claude-opus-4-7)
 	MaxRuns           int     // max runs to retain per skill; 0 = keep all
 	LLMJudgeWeight    float64 // category weight for LLM judge evals (default 0.30)

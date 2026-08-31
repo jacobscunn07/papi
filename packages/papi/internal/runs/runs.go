@@ -82,10 +82,11 @@ type Iteration struct {
 	skillMd    string
 }
 
-// SkillMd returns the SKILL.md snapshot that ran for this iteration.
+// SkillMd returns the skill snapshot that ran for this iteration: SKILL.md plus
+// its reference files, packed by config.MarshalBundle.
 func (it *Iteration) SkillMd() string { return it.skillMd }
 
-// SetSkillMd records the SKILL.md snapshot for this iteration. Used by the TUI to
+// SetSkillMd records the skill snapshot for this iteration. Used by the TUI to
 // populate a live iteration (built from progress events, not the store).
 func (it *Iteration) SetSkillMd(s string) { it.skillMd = s }
 

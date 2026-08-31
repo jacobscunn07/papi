@@ -22,6 +22,12 @@ export interface ClaudeJsonOutput {
   };
 }
 
+/** A supporting file of the skill, alongside SKILL.md (always `references/<name>.md`). */
+export interface SkillFile {
+  path: string;
+  content: string;
+}
+
 export interface EvalContext {
   scenario: Scenario;
   invocationTranscript: string;
@@ -30,7 +36,13 @@ export interface EvalContext {
   qualityOutput: ClaudeJsonOutput | null;
   skillName: string;
   skillDescription: string;
+  /** SKILL.md's body, frontmatter stripped. */
   skillContent: string;
+  /**
+   * The reference files SKILL.md discloses progressively. An eval that inspects the
+   * skill itself must check these too, or content moved out of SKILL.md evades it.
+   */
+  skillFiles: SkillFile[];
   skillDir: string;
   workDir: string;
   invoked: boolean;
