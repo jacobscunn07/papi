@@ -28,10 +28,15 @@ func (g *ResearchGit) run(args ...string) (string, error) {
 	return strings.TrimSpace(stdout.String()), nil
 }
 
-// CommitSkill stages SKILL.md and creates a commit. Returns the new SHA.
-// If nothing changed after staging, it skips the commit and returns the current HEAD SHA.
-func (g *ResearchGit) CommitSkill(skillMdPath, message string) (string, error) {
-	if _, err := g.run("add", skillMdPath); err != nil {
+// CommitSkillDir stages the whole skill directory and creates a commit. Returns the
+// new SHA. If nothing changed after staging, it skips the commit and returns the
+// current HEAD SHA.
+//
+// The skill is a set of files — SKILL.md plus the references/ it discloses — so the
+// commit has to cover the directory, and `add -A` is what records a reference file the
+// agent decided to drop.
+func (g *ResearchGit) CommitSkillDir(skillDir, message string) (string, error) {
+	if _, err := g.run("add", "-A", "--", skillDir); err != nil {
 		return "", err
 	}
 	staged, err := g.run("diff", "--cached", "--name-only")
@@ -51,9 +56,18 @@ func (g *ResearchGit) CommitSkill(skillMdPath, message string) (string, error) {
 	return sha, nil
 }
 
-// RevertSkillFile checks out SKILL.md from a specific commit without touching anything else.
-func (g *ResearchGit) RevertSkillFile(skillMdPath, sha string) error {
-	_, err := g.run("checkout", sha, "--", skillMdPath)
+// RevertSkillDir restores the skill directory to a specific commit without touching
+// anything else in the repo.
+//
+// `checkout` alone is not enough: it restores tracked files but leaves behind any
+// reference file the rejected proposal newly created, which Claude would still find on
+// disk. `clean -fd` removes those. It is scoped to skillDir and deliberately omits -x,
+// so ignored files elsewhere (run artifacts under .papi/) are never in range.
+func (g *ResearchGit) RevertSkillDir(skillDir, sha string) error {
+	if _, err := g.run("checkout", sha, "--", skillDir); err != nil {
+		return err
+	}
+	_, err := g.run("clean", "-fd", "--", skillDir)
 	return err
 }
 

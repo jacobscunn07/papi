@@ -106,14 +106,14 @@ func (m *model) detailIteration(r *row) string {
 			rows))
 	}
 
-	// SKILL.md diff vs previous iteration.
-	fmt.Fprintf(&b, "\n%s\n", eyebrow("SKILL.md changes"))
+	// Skill diff vs previous iteration: SKILL.md and its reference files.
+	fmt.Fprintf(&b, "\n%s\n", eyebrow("skill changes"))
 	if r.prevIter == nil {
 		fmt.Fprintln(&b, mutedStyle.Render("(baseline — no previous iteration to diff against)"))
 	} else {
 		diff := runs.DiffSkillMd(r.prevIter.SkillMd(), it.SkillMd())
 		if strings.TrimSpace(diff) == "" {
-			fmt.Fprintln(&b, mutedStyle.Render("(no changes to SKILL.md)"))
+			fmt.Fprintln(&b, mutedStyle.Render("(no changes to the skill)"))
 		} else {
 			fmt.Fprint(&b, colorizeDiff(diff))
 		}

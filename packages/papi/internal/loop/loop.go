@@ -211,7 +211,7 @@ func runAllScenarios(
 	return results, totalCost, nil
 }
 
-func buildResearchPrompt(currentSkillMd string, prevResults []types.ScenarioRunResult, prevScore float64, iteration int) string {
+func buildResearchPrompt(currentSkillMd string, currentFiles []types.SkillFile, prevResults []types.ScenarioRunResult, prevScore float64, iteration int) string {
 	var sb strings.Builder
 	for _, r := range prevResults {
 		var evalLines []string
@@ -222,15 +222,35 @@ func buildResearchPrompt(currentSkillMd string, prevResults []types.ScenarioRunR
 			r.Scenario.ID, r.Invoked, pct(r.ScenarioScore), strings.Join(evalLines, "\n")))
 	}
 
+	// The agent can only edit reference files it can see, so the whole current skill
+	// goes in, not just SKILL.md.
+	refs := "_None - the skill is currently a single file._\n"
+	if len(currentFiles) > 0 {
+		var rb strings.Builder
+		for _, f := range currentFiles {
+			rb.WriteString(fmt.Sprintf("#### %s\n```markdown\n%s\n```\n\n", f.Path, f.Content))
+		}
+		refs = rb.String()
+	}
+
 	return fmt.Sprintf("## Iteration %d — Research Agent Input\n\n"+
 		"### Current aggregate score: %s\n\n"+
 		"### Current SKILL.md:\n```markdown\n%s\n```\n\n"+
+		"### Current reference files (references/):\n%s\n"+
 		"### Previous scenario results:\n%s\n"+
 		"### Your task:\n"+
-		"Propose an improved version of SKILL.md that will score higher.\n\n"+
+		"Propose an improved version of the skill that will score higher.\n\n"+
 		"Output ONLY valid JSON (no markdown fences, no preamble) in this exact format:\n"+
-		`{"description": "<one sentence: what you are changing and why>", "skillMd": "<complete SKILL.md content starting with --->"}`,
-		iteration, pct(prevScore), currentSkillMd, sb.String())
+		`{"description": "<one sentence: what you are changing and why>", `+
+		`"skillMd": "<complete SKILL.md content starting with --->", `+
+		`"files": [{"path": "references/<topic>.md", "content": "<complete file content>"}]}`+
+		"\n\n"+
+		"`files` is the complete reference set: omit it (or pass `[]`) to keep the skill a\n"+
+		"single file, and include every reference file you want to keep - any file you leave\n"+
+		"out is deleted. Every file you supply must be linked from SKILL.md (or from another\n"+
+		"reference), and every `references/...` path you mention must be supplied. A proposal\n"+
+		"that breaks either rule is rejected outright and scores 0 for the iteration.",
+		iteration, pct(prevScore), currentSkillMd, refs, sb.String())
 }
 
 var frontmatterPrefixRe = regexp.MustCompile(`(?s)^[\s\S]*?(---\n)`)
@@ -267,7 +287,7 @@ func findResumableRun(st *store.Store, cfg *types.ResearchConfig) (types.RunStat
 	return types.RunState{}, fmt.Errorf("no resumable run found for skill %q", cfg.SkillName)
 }
 
-func callResearchAgent(agentPrompt, systemPrompt, model string) (description, skillMd string, cost float64, err error) {
+func callResearchAgent(agentPrompt, systemPrompt, model string) (description, skillMd string, files []types.SkillFile, cost float64, err error) {
 	cmd := exec.Command("claude",
 		"-p", agentPrompt,
 		"--model", model,
@@ -279,20 +299,23 @@ func callResearchAgent(agentPrompt, systemPrompt, model string) (description, sk
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err = cmd.Run(); err != nil {
-		return "", "", 0, fmt.Errorf("research agent exec: %w\n%s", err, stderr.String())
+		return "", "", nil, 0, fmt.Errorf("research agent exec: %w\n%s", err, stderr.String())
 	}
 	var out types.ClaudeJsonOutput
 	if err = json.Unmarshal(stdout.Bytes(), &out); err != nil {
-		return "", "", 0, fmt.Errorf("parse research agent output: %w", err)
+		return "", "", nil, 0, fmt.Errorf("parse research agent output: %w", err)
 	}
 	var parsed struct {
-		Description string `json:"description"`
-		SkillMd     string `json:"skillMd"`
+		Description string            `json:"description"`
+		SkillMd     string            `json:"skillMd"`
+		Files       []types.SkillFile `json:"files"`
 	}
 	if jsonErr := json.Unmarshal([]byte(out.Result), &parsed); jsonErr == nil && parsed.SkillMd != "" {
-		return parsed.Description, parsed.SkillMd, out.TotalCostUSD, nil
+		return parsed.Description, parsed.SkillMd, parsed.Files, out.TotalCostUSD, nil
 	}
-	return "", stripPreamble(out.Result), out.TotalCostUSD, nil
+	// Fallback: the agent ignored the JSON contract and emitted the file directly.
+	// That form can only express SKILL.md, so it proposes a single-file skill.
+	return "", stripPreamble(out.Result), nil, out.TotalCostUSD, nil
 }
 
 // purgeOldRuns drops all but the newest maxRuns runs from the store and removes
@@ -344,11 +367,13 @@ func acquireLock(repoRoot, skillName string, rep progress.Reporter) (func(), err
 	return func() { _ = os.Remove(lockPath) }, nil
 }
 
-// snapshotSkillMd returns the SKILL.md currently on disk so the exact version that
-// ran (accepted or rejected) can be persisted with the iteration for diffing.
-func snapshotSkillMd(skillDir string) string {
+// snapshotSkillDir returns the skill currently on disk - SKILL.md plus its reference
+// files, packed into one bundle string - so the exact version that ran (accepted or
+// rejected) can be persisted with the iteration for diffing and for resume.
+func snapshotSkillDir(skillDir string) string {
 	b, _ := os.ReadFile(filepath.Join(skillDir, "SKILL.md"))
-	return string(b)
+	files, _ := config.ReadSkillFiles(skillDir)
+	return config.MarshalBundle(string(b), files)
 }
 
 // Run executes the full research loop, emitting progress events to rep. When
@@ -371,7 +396,6 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, st *st
 	} else {
 		runTimestamp = fmt.Sprintf("%d", runStart.UnixMilli())
 	}
-	skillMdPath := filepath.Join(cfg.SkillDir, "SKILL.md")
 
 	// Persist LogLine events to the store so past runs can replay their output.
 	// The tee wraps the raw reporter; WithScope layers on top so each line it sees
@@ -501,10 +525,10 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, st *st
 		bestScore = resumeState.BestScore / 100.0
 		bestSha = resumeState.BestSha
 		totalCost = resumeState.TotalCost
-		// Restore the working SKILL.md to the best committed version so the research
+		// Restore the working skill to the best committed version so the research
 		// agent continues from the best skill, not a half-finished iteration.
 		if !cfg.DryRun && bestSha != "" {
-			if err := git.RevertSkillFile(skillMdPath, bestSha); err != nil {
+			if err := git.RevertSkillDir(cfg.SkillDir, bestSha); err != nil {
 				return err
 			}
 		}
@@ -529,7 +553,7 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, st *st
 		rep.Emit(progress.IterationStarted{Iter: 0, Best: 0})
 		baselineDir := iterationDirPath(repoRoot, cfg.SkillName, runTimestamp, 0)
 		_ = os.MkdirAll(baselineDir, 0755)
-		baselineSkillMd := snapshotSkillMd(cfg.SkillDir)
+		baselineSkillMd := snapshotSkillDir(cfg.SkillDir)
 		// Checkpoint each completed scenario so a stop/crash mid-baseline resumes cleanly.
 		persistBaseline := func(partial []types.ScenarioRunResult) {
 			_ = st.SaveIteration(cfg.SkillName, runTimestamp, 0, scorer.AggregateScore(partial),
@@ -555,7 +579,7 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, st *st
 		}
 
 		if !cfg.DryRun {
-			bestSha, err = git.CommitSkill(skillMdPath,
+			bestSha, err = git.CommitSkillDir(cfg.SkillDir,
 				fmt.Sprintf("research(%s): baseline score=%s", cfg.SkillName, pct(bestScore)))
 			if err != nil {
 				return fmt.Errorf("baseline commit: %w", err)
@@ -633,53 +657,64 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, st *st
 		}
 
 		var description, proposedSkillMd string
+		var proposedFiles []types.SkillFile
 		var completed []types.ScenarioRunResult
+		var proposalErr error
 		if iter == startIter && partialResults != nil && partialSkillMd != "" {
 			// Resume an interrupted iteration: reuse the proposal that was being
 			// evaluated and the scenarios already completed against it; skip the agent.
-			description, proposedSkillMd, completed = partialExperiment, partialSkillMd, partialResults
+			// The stored snapshot is a bundle, so reference files come back too.
+			description, completed = partialExperiment, partialResults
+			proposedSkillMd, proposedFiles, proposalErr = config.UnmarshalBundle(partialSkillMd)
 			rep.Emit(progress.LogLine{Text: fmt.Sprintf("Continuing interrupted iteration %d: reusing %d completed scenario(s).", iter, len(completed))})
-			rep.Emit(progress.ResearchAgentDone{Iter: iter, Description: description, Cost: 0, SkillMd: proposedSkillMd})
+			rep.Emit(progress.ResearchAgentDone{Iter: iter, Description: description, Cost: 0, SkillMd: partialSkillMd})
 		} else {
 			currentSkillMdBytes, err := os.ReadFile(filepath.Join(cfg.SkillDir, "SKILL.md"))
 			if err != nil {
 				return err
 			}
-			agentPrompt := buildResearchPrompt(string(currentSkillMdBytes), prevResults, bestScore, iter)
+			currentFiles, err := config.ReadSkillFiles(cfg.SkillDir)
+			if err != nil {
+				return err
+			}
+			agentPrompt := buildResearchPrompt(string(currentSkillMdBytes), currentFiles, prevResults, bestScore, iter)
 
 			var agentCost float64
-			description, proposedSkillMd, agentCost, err = callResearchAgent(agentPrompt, programMd, cfg.ResearchModel)
+			description, proposedSkillMd, proposedFiles, agentCost, err = callResearchAgent(agentPrompt, programMd, cfg.ResearchModel)
 			if err != nil {
 				return fmt.Errorf("research agent iter %d: %w", iter, err)
 			}
 			totalCost += agentCost
-			rep.Emit(progress.ResearchAgentDone{Iter: iter, Description: description, Cost: agentCost, SkillMd: proposedSkillMd})
+			rep.Emit(progress.ResearchAgentDone{Iter: iter, Description: description, Cost: agentCost,
+				SkillMd: config.MarshalBundle(proposedSkillMd, proposedFiles)})
 		}
 
-		// The agent occasionally emits invalid YAML frontmatter (e.g. an unquoted
-		// description containing ": "). Repair the common cases; if it still won't
-		// parse, reject this proposal instead of writing a file that would crash the
-		// next scenario read and abort the whole run.
-		var proposalValid bool
-		if fixed, ok := config.RepairFrontmatter(proposedSkillMd); ok {
-			proposedSkillMd = fixed
-			proposalValid = true
-		} else {
-			rep.Emit(progress.LogLine{Text: fmt.Sprintf("  → REJECTED: proposed SKILL.md has invalid YAML frontmatter (iter %d)", iter)})
+		// Validate before writing anything. The agent occasionally emits invalid YAML
+		// frontmatter (an unquoted description containing ": ") or points SKILL.md at a
+		// reference file it never supplied; either would corrupt the skill on disk and
+		// abort or silently gut the rest of the run.
+		proposalValid := proposalErr == nil
+		if proposalValid {
+			proposedSkillMd, proposedFiles, proposalErr = config.ValidateProposal(proposedSkillMd, proposedFiles)
+			proposalValid = proposalErr == nil
+		}
+		if !proposalValid {
+			rep.Emit(progress.LogLine{Text: fmt.Sprintf("  → REJECTED (iter %d): %v", iter, proposalErr)})
 		}
 
 		if proposalValid && !cfg.DryRun {
-			if err := os.WriteFile(filepath.Join(cfg.SkillDir, "SKILL.md"), []byte(proposedSkillMd), 0644); err != nil {
+			if err := config.WriteSkillFiles(cfg.SkillDir, proposedSkillMd, proposedFiles); err != nil {
 				return err
 			}
 		}
 
 		iterDir := iterationDirPath(repoRoot, cfg.SkillName, runTimestamp, iter)
 		_ = os.MkdirAll(iterDir, 0755)
-		// The snapshot for this iteration is the proposal itself — what the agent
+		// The snapshot for this iteration is the proposal itself - what the agent
 		// changed and (in non-dry-run) what ran. Using the proposal directly keeps
-		// live, persisted, and dry-run views consistent.
-		iterSkillMd := proposedSkillMd
+		// live, persisted, and dry-run views consistent. It is stored as a bundle so a
+		// resume of this iteration restores the reference files too, not just SKILL.md.
+		iterSkillMd := config.MarshalBundle(proposedSkillMd, proposedFiles)
 		// Checkpoint each completed scenario so a stop/crash mid-iteration resumes cleanly.
 		persistIter := func(partial []types.ScenarioRunResult) {
 			_ = st.SaveIteration(cfg.SkillName, runTimestamp, iter, scorer.AggregateScore(partial),
@@ -697,9 +732,9 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, st *st
 		if err != nil {
 			if ctx.Err() != nil {
 				_ = st.SaveIteration(cfg.SkillName, runTimestamp, iter, scorer.AggregateScore(iterResults), time.Since(iterStart).Milliseconds(), description, iterSkillMd, iterResults)
-				// Restore best SKILL.md so a half-finished iteration is not left on disk.
+				// Restore the best skill so a half-finished iteration is not left on disk.
 				if !cfg.DryRun && bestSha != "" {
-					_ = git.RevertSkillFile(filepath.Join(cfg.SkillDir, "SKILL.md"), bestSha)
+					_ = git.RevertSkillDir(cfg.SkillDir, bestSha)
 				}
 				rep.Emit(progress.LogLine{Text: "Stopped."})
 				return finalize(bestScore, bestSha, false)
@@ -719,7 +754,7 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, st *st
 
 		if !cfg.DryRun {
 			if improved {
-				bestSha, err = git.CommitSkill(skillMdPath,
+				bestSha, err = git.CommitSkillDir(cfg.SkillDir,
 					fmt.Sprintf("research(%s): iter %03d score=%s [+%s]",
 						cfg.SkillName, iter, pct(iterScore), pct(delta)))
 				if err != nil {
@@ -729,7 +764,7 @@ func Run(ctx context.Context, cfg *types.ResearchConfig, repoRoot string, st *st
 				iterRep.Emit(progress.LogLine{Text: fmt.Sprintf("  → IMPROVED +%s", pct(delta))})
 			} else {
 				if bestSha != "" {
-					if err := git.RevertSkillFile(skillMdPath, bestSha); err != nil {
+					if err := git.RevertSkillDir(cfg.SkillDir, bestSha); err != nil {
 						return err
 					}
 				}

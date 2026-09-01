@@ -9,8 +9,12 @@ A monorepo of installable Claude Code **skills** plus **papi**, an autoresearch 
 testing it, asking a research agent to rewrite it, and keeping the change only if the
 score goes up.
 
-- `skills/<name>/` — distributable skill files (`SKILL.md` + `README.md`). `SKILL.md` is
-  what papi optimizes; its YAML frontmatter `description` is the **primary** optimization target.
+- `skills/<name>/` — distributable skill files (`SKILL.md` + `README.md`, plus optional
+  `references/*.md`). `SKILL.md` is what papi optimizes; its YAML frontmatter `description`
+  is the **primary** optimization target. Past ~200 lines the agent is told to keep
+  `SKILL.md` a short router and move depth into `references/<topic>.md` (progressive
+  disclosure); those files are loaded on demand via `--plugin-dir`, and papi owns the whole
+  `references/` tree — it is rewritten wholesale on every accepted proposal.
 - `packages/papi/` — the Go CLI/TUI that runs the loop (private, not distributed).
 - `.papi/skills/<name>/` — per-skill test harness: `scenarios/`, `evals/`, `hooks/`,
   `config.yaml`, and `runs/` (generated artifacts, gitignored).
@@ -20,12 +24,13 @@ score goes up.
 ## Commands
 
 ```bash
-# Run the loop on a skill (npm wrapper passes --repo-root $INIT_CWD so it works from repo root)
-npm run papi -- --skill terraform-author --iterations 20 --budget 5.0
-# Equivalent direct invocation (note: subcommand is `run`, the npm script omits it):
+# Run the loop on a skill (npm wrapper passes --repo-root "$INIT_CWD" so it works from repo root)
+npm run papi -- run terraform-author --iterations 20 --budget 5.0
+# Equivalent direct invocation:
 go run -C packages/papi . run terraform-author --iterations 20 --budget 5.0
 
 # Launch the interactive TUI (no subcommand): skill picker + live/past run browser
+npm run papi
 go run -C packages/papi .
 
 # Useful flags: --dry-run (eval without writing SKILL.md or committing), --tags a,b
@@ -51,14 +56,19 @@ loads scenarios + hooks, builds the eval registry, then:
 
 1. **Iteration 0 (baseline):** run all scenarios against the current `SKILL.md`, score, commit.
 2. **Iterations 1..N:** call the **research agent** (`callResearchAgent`) with the current
-   `SKILL.md` + previous scenario results; it returns a proposed new `SKILL.md` as JSON. Write
-   it, re-run all scenarios, score. **If the score improved → `git commit`; else → revert the
-   file to the best SHA** (`git.RevertSkillFile`). Stops on max-iterations or budget exhaustion.
+   skill (`SKILL.md` + `references/*.md`) + previous scenario results; it returns a proposed
+   skill as JSON (`{description, skillMd, files[]}`). `config.ValidateProposal` checks it —
+   frontmatter repair, `references/`-only paths, and link integrity in both directions (a
+   SKILL.md pointing at a file the proposal never supplies is rejected outright and scores 0)
+   — then `config.WriteSkillFiles` applies it, and all scenarios re-run and score. **If the
+   score improved → `git commit`; else → revert the skill dir to the best SHA**
+   (`git.RevertSkillDir`, which is `checkout` + `clean -fd` so files the rejected proposal
+   added do not survive). Stops on max-iterations or budget exhaustion.
 3. **Finalize:** tag the best commit (`research/<skill>/<ts>-best-<score>`), purge old runs,
    run post-run hooks.
 
 Cancelling the context (ctx) stops gracefully at the next scenario/iteration boundary and
-restores the best `SKILL.md`.
+restores the best version of the skill.
 
 ### Per-scenario three-phase pipeline (`runner.RunScenario` → `scorer.ScoreScenario`)
 
@@ -93,7 +103,9 @@ This split is the core mental model of the whole system:
   Each receives the `EvalContext` as JSON on **stdin** and must print an `EvalResult` JSON to **stdout**
   (`evalId`, `name`, `score` 0–1, `reasoning`, optional `required`). Script evals are always treated as
   non-LLM-judge. See `evals/types.ts` for the context/result shapes. The two built-in evals
-  (`skill-used`, `output-quality`) are always included.
+  (`skill-used`, `output-quality`) are always included. An eval that inspects the skill itself
+  must read **both** `ctx.skillContent` (SKILL.md's body) and `ctx.skillFiles` (the reference
+  files), or content moved out of SKILL.md silently evades it.
 - **Hooks:** declared in `.papi/skills/<name>/config.yaml` under `hooks:`. Lifecycle points:
   `pre/post-run`, `pre/post-iteration`, `pre/post-scenario`, `pre/post-eval`, `post-quality`.
   Each accepts a single path or an ordered list, and must be a `.ts` or `.js` file. Hooks communicate
@@ -102,6 +114,9 @@ This split is the core mental model of the whole system:
 
 ## Conventions
 
+- All flags live on the root command's persistent flag set (`cmd/loop.go`), so they apply to
+  `papi run` and to the bare TUI invocation alike (the TUI builds configs from the same viper
+  settings).
 - `appconfig.Resolve` walks up from `--repo-root` to find the nearest `.papi/` dir, so commands
   work from the repo root or a subdirectory. `appconfig.Build` assembles the `ResearchConfig`.
 - Keep `internal/types` free of dependencies on other internal packages — it's the shared schema
@@ -109,4 +124,8 @@ This split is the core mental model of the whole system:
 - Progress is event-driven: business logic emits `progress.*` events to a `progress.Reporter`
   (CLI reporter or the bubbletea TUI); never write directly to stdout from the loop/runner.
 - Generated run artifacts live under `.papi/skills/<name>/runs/<timestamp>/iteration-NNN/` and are
-  gitignored; only `SKILL.md` changes are committed by the loop.
+  gitignored; only changes under `skills/<name>/` are committed by the loop.
+- An iteration's stored snapshot is a **bundle** (`config.MarshalBundle`): SKILL.md followed by
+  each reference file behind a `<!-- papi:file ... -->` marker. One string keeps the store
+  schema and the TUI diff unchanged, and it round-trips exactly, which is what lets an
+  interrupted iteration resume with its reference files intact.

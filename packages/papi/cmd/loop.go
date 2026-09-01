@@ -56,7 +56,7 @@ var runCmd = &cobra.Command{
 }
 
 func init() {
-	flags := runCmd.Flags()
+	flags := papiCmd.PersistentFlags()
 
 	flags.Int("iterations", 20, "Max iterations")
 	flags.Float64("budget", 5.0, "Max spend in USD")
@@ -71,7 +71,9 @@ func init() {
 	flags.Int("llm-weight", 30, "Category weight % for LLM judge evals (default 30)")
 	flags.Int("weight", 70, "Category weight % for non-LLM judge evals (default 70; with llm-weight must sum to 100)")
 
-	// Bind all flags to viper so env vars and config files also work.
+	// Bind all flags to viper so env vars and config files also work. The flags
+	// live on the root command's persistent set so they apply both to `papi run`
+	// and to the bare TUI invocation, which reads the same viper settings.
 	// Env var convention: RESEARCH_BUDGET, RESEARCH_ITERATIONS, etc.
 	_ = viper.BindPFlags(flags)
 	viper.SetEnvPrefix("RESEARCH")

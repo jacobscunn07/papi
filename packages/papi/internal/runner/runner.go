@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"papi/internal/config"
 	"papi/internal/progress"
 	"papi/internal/script"
 	"papi/internal/types"
@@ -312,6 +313,13 @@ func RunScenario(
 		qualityTranscript = qualityOut.Result
 	}
 
+	// Reference files are part of the skill under test: an eval that inspects the skill
+	// must see them, or moving content out of SKILL.md would silently evade it.
+	skillFiles, err := config.ReadSkillFiles(skillDir)
+	if err != nil {
+		return ctxOut, totalCostUSD, time.Since(start).Milliseconds(), fmt.Errorf("read skill reference files: %w", err)
+	}
+
 	ctxOut = types.EvalContext{
 		Scenario:             scenario,
 		InvocationTranscript: invocationOut.Result,
@@ -321,6 +329,7 @@ func RunScenario(
 		SkillName:            skillName,
 		SkillDescription:     skillDescription,
 		SkillContent:         skillContent,
+		SkillFiles:           skillFiles,
 		SkillDir:             skillDir,
 		WorkDir:              workDir,
 		Invoked:              invoked,

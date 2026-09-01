@@ -48,6 +48,56 @@ Once the skill is being invoked reliably, improve the body:
 - Cover the scenarios that scored lowest on quality evals
 - Remove generic advice Claude already knows without the skill
 
+### Priority 3: Progressive disclosure (once SKILL.md gets long)
+
+SKILL.md is a **router**, not an encyclopedia. All of it is loaded into context on
+every invocation, so past a certain size the detail Claude does not need for *this*
+task crowds out the detail it does.
+
+**Budget: keep SKILL.md at or under 200 lines.** Below that, leave it as a single
+file - splitting a short skill only adds indirection. Above it, move depth into
+`references/<topic>.md` and leave a one-line pointer behind.
+
+**Stays in SKILL.md** (needed on every task):
+
+- the frontmatter
+- any output contract or hard rule that applies to every response
+- a routing table naming each reference file and when to read it
+- the short, high-frequency patterns
+
+**Moves into `references/<topic>.md`** (needed only on some tasks):
+
+- long worked examples and full file listings
+- per-resource, per-library, or per-tool detail
+- topic-specific decision matrices
+- anything that is reference material rather than instruction
+
+Make each routing trigger concrete enough that Claude knows to open the file
+*without* having read it, and phrase the routing as a **mandatory read, not a
+suggestion**. A passive "see references/x.md" is routinely ignored: the rule stays in
+SKILL.md, its detail moves out, and the response is then written from the summary
+alone. Say "**Before emitting any HCL, read `references/x.md`**" and keep the
+non-negotiable rule itself in SKILL.md, with the reference carrying only its
+elaboration.
+
+| If the task involves | Read |
+|---|---|
+| setting up CI or tests | `references/ci-testing.md` |
+| one library's or resource's API surface | `references/<that-thing>.md` |
+
+**These rules reject the entire proposal when broken:**
+
+1. Every `references/...` path you mention must be supplied in `files`. A pointer to
+   a file that does not exist is worse than no pointer: Claude follows it, finds
+   nothing, and answers from a router with no content behind it.
+2. Every file you supply must be linked from SKILL.md, or from another reference you
+   supply.
+3. `files` is the **complete** set. Any existing reference file you leave out is
+   deleted - re-send the ones you want to keep, unchanged, alongside the ones you
+   change.
+4. Paths must look like `references/<name>.md`. No other directory, no other
+   extension.
+
 ## Constraints
 
 1. **Do not change** the `name` field in the frontmatter
@@ -60,8 +110,18 @@ Once the skill is being invoked reliably, improve the body:
    or leading `&`/`*`/`!` — wrap the whole value in **single quotes** (double an inner
    `'` to escape it). Backticks are **not** quotes and do **not** make a value safe.
    Example: `description: 'Use for CI (`runs: using: node20`), matrix builds, and OIDC.'`
+7. Keep SKILL.md at or under **200 lines**. Past that, split the overflow into
+   `references/<topic>.md` rather than growing the file.
 
 ## Output Format
 
-Output **ONLY** the complete new SKILL.md content, starting with `---`.
-No explanation. No preamble. No code fences. Just the file content.
+Respond with **only** a JSON object - no preamble, no explanation, no code fences:
+
+```
+{"description": "<one sentence: what you are changing and why>",
+ "skillMd": "<complete SKILL.md content, starting with --->",
+ "files": [{"path": "references/<topic>.md", "content": "<complete file content>"}]}
+```
+
+Omit `files` (or pass `[]`) to keep the skill a single file. Send whole files only -
+never a diff, a fragment, or an elided "...unchanged..." placeholder.
